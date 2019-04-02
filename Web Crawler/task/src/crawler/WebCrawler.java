@@ -10,5 +10,11 @@ public class WebCrawler extends JFrame {
         setVisible(true);
         setLayout(null);
         setTitle("Web Crawler");
+        var text = new JTextArea("   HTML code?");
+        text.setName("TextArea");
+        var pane = new JScrollPane(text);
+        pane.setBounds(40, 40, 200, 200);
+        text.disable();
+        add(pane);
     }
 }
