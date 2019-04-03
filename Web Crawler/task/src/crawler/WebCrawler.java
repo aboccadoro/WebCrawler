@@ -19,7 +19,6 @@ public class WebCrawler extends JFrame {
 
         var site_url = new JTextField();
         site_url.setName("UrlTextField");
-
         var download = new JButton("Get HTML");
         download.setName("RunButton");
 
@@ -38,38 +37,44 @@ public class WebCrawler extends JFrame {
                 user_input_layout.createSequentialGroup()
                         .addGroup(user_input_layout.createParallelGroup(GroupLayout.Alignment.LEADING)
                                 .addComponent(site_url)
-                                .addComponent(download))
+                                .addComponent(download)
+                        )
         );
         user_input_pane.add(site_url);
         user_input_pane.add(download);
         add(user_input_pane, BorderLayout.PAGE_START);
 
         var html = new JTextArea();
-        html.setName("HTMLTextArea");
+        html.setName("HtmlTextArea");
+        html.setEditable(false);
         var html_pane = new JScrollPane(html);
         add(html_pane, BorderLayout.CENTER);
+
+        download.addActionListener(e -> {
+            try {
+                final String url = site_url.getText();
+
+                final InputStream inputStream = new URL(url).openStream();
+                final BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
+                final StringBuilder stringBuilder = new StringBuilder();
+
+                String nextLine;
+                while ((nextLine = reader.readLine()) != null) {
+                    stringBuilder.append(nextLine);
+                    stringBuilder.append(System.getProperty("line.separator"));
+                }
+
+                final String siteText = stringBuilder.toString();
+                html.setText(siteText);
+            }
+            catch (IOException error) {
+                html.setText("");
+            }
+        });
 
         pack();
         setSize(800, 600);
 
-//        try {
-//            final String url = site_url.getText();
-//
-//            final InputStream inputStream = new URL(url).openStream();
-//            final BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
-//            final StringBuilder stringBuilder = new StringBuilder();
-//
-//            String nextLine;
-//            while ((nextLine = reader.readLine()) != null) {
-//                stringBuilder.append(nextLine);
-//                stringBuilder.append(System.getProperty("line.separator"));
-//            }
-//
-//            final String siteText = stringBuilder.toString();
-//        }
-//        catch (IOException e) {
-//            e.printStackTrace();
-//            System.exit(-1);
-//        }
+        html.disable();
     }
 }
