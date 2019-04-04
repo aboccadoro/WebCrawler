@@ -18,17 +18,29 @@ public class WebCrawler extends JFrame {
         setTitle("Web Crawler");
         setVisible(true);
 
-        var site_url = new JTextField("http://www.example.com");
+        final var url_label = new JLabel("URL:  ");
+        final var site_url = new JTextField("http://www.example.com");
         site_url.setName("UrlTextField");
-        var download = new JButton("Get HTML");
-        download.setName("RunButton");
-        var url_label = new JLabel("URL:  ");
-        var title_label = new JLabel("Title:  ");
-        var title_label_text = new JLabel();
+        final var parse_button = new JButton("Parse");
+        parse_button.setName("RunButton");
+        final var title_label = new JLabel("Title:  ");
+        final var title_label_text = new JLabel();
         title_label_text.setName("TitleLabel");
+        final var html_text = new JTextArea();
 
-        var user_input_pane = new JPanel();
-        GroupLayout user_input_layout = new GroupLayout(user_input_pane);
+        initUI(url_label, site_url, parse_button, title_label, title_label_text, html_text);
+        initParser(parse_button, site_url, title_label_text, html_text);
+
+        pack();
+        setSize(800, 600);
+
+        html_text.disable();
+        parse_button.doClick();
+    }
+
+    private void initUI(JLabel url_label, JTextField site_url, JButton parse_button, JLabel title_label, JLabel title_label_text, JTextArea html_text) {
+        final var user_input_pane = new JPanel();
+        var user_input_layout = new GroupLayout(user_input_pane);
         user_input_pane.setLayout(user_input_layout);
         user_input_layout.setAutoCreateGaps(true);
         user_input_layout.setAutoCreateContainerGaps(true);
@@ -42,14 +54,14 @@ public class WebCrawler extends JFrame {
                                 .addComponent(site_url)
                                 .addComponent(title_label_text)
                         )
-                        .addComponent(download)
+                        .addComponent(parse_button)
         );
         user_input_layout.setVerticalGroup(
                 user_input_layout.createSequentialGroup()
                         .addGroup(user_input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                                 .addComponent(url_label)
                                 .addComponent(site_url)
-                                .addComponent(download)
+                                .addComponent(parse_button)
                         )
                         .addGroup(user_input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                                 .addComponent(title_label)
@@ -58,13 +70,14 @@ public class WebCrawler extends JFrame {
         );
         add(user_input_pane, BorderLayout.PAGE_START);
 
-        var html = new JTextArea();
-        html.setName("HtmlTextArea");
-        html.setEditable(false);
-        var html_pane = new JScrollPane(html);
+        html_text.setName("HtmlTextArea");
+        html_text.setEditable(false);
+        final var html_pane = new JScrollPane(html_text);
         add(html_pane, BorderLayout.CENTER);
+    }
 
-        download.addActionListener(e -> {
+    private void initParser(JButton parse_button, JTextField site_url, JLabel title_label_text, JTextArea html_text) {
+        parse_button.addActionListener(e -> {
             try {
                 final String url = site_url.getText();
 
@@ -73,7 +86,7 @@ public class WebCrawler extends JFrame {
                 final var stringBuilder = new StringBuilder();
 
                 String nextLine;
-                AtomicBoolean matched = new AtomicBoolean(false);
+                var matched = new AtomicBoolean(false);
                 var p = Pattern.compile(".*<title>(.*)</title>.*");
                 while ((nextLine = reader.readLine()) != null) {
                     stringBuilder.append(nextLine);
@@ -83,21 +96,14 @@ public class WebCrawler extends JFrame {
                         matched.set(true);
                         title_label_text.setText(m.group(1));
                     }
-                    else if (m.matches()) System.out.println("multiple");
                 }
 
                 final var siteText = stringBuilder.toString();
-                html.setText(siteText);
+                html_text.setText(siteText);
             }
             catch (IOException error) {
-                html.setText("");
+                html_text.setText("");
             }
         });
-
-        pack();
-        setSize(800, 600);
-
-        html.disable();
-        download.doClick();
     }
 }
