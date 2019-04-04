@@ -1,6 +1,7 @@
 package crawler;
 
 import javax.swing.*;
+import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -19,26 +20,29 @@ public class WebCrawler extends JFrame {
         setVisible(true);
 
         final var url_label = new JLabel("URL:  ");
-        final var site_url = new JTextField("http://www.example.com");
+        final var site_url = new JTextField("https://www.wikipedia.org/");
         site_url.setName("UrlTextField");
         final var parse_button = new JButton("Parse");
         parse_button.setName("RunButton");
         final var title_label = new JLabel("Title:  ");
         final var title_label_text = new JLabel();
         title_label_text.setName("TitleLabel");
-        final var html_text = new JTextArea();
+        String[] column_names = {"URL", "Title"};
+        DefaultTableModel title_table_model = new DefaultTableModel(column_names, 0);
+        final var title_table = new JTable(title_table_model);
+        title_table.setName("TitlesTable");
 
-        initUI(url_label, site_url, parse_button, title_label, title_label_text, html_text);
-        initParser(parse_button, site_url, title_label_text, html_text);
+        initUI(url_label, site_url, parse_button, title_label, title_label_text, title_table);
+        initParser(parse_button, site_url, title_label_text, title_table_model);
 
         pack();
         setSize(800, 600);
 
-        html_text.disable();
+        title_table.disable();
         parse_button.doClick();
     }
 
-    private void initUI(JLabel url_label, JTextField site_url, JButton parse_button, JLabel title_label, JLabel title_label_text, JTextArea html_text) {
+    private void initUI(JLabel url_label, JTextField site_url, JButton parse_button, JLabel title_label, JLabel title_label_text, JTable title_table) {
         final var user_input_pane = new JPanel();
         var user_input_layout = new GroupLayout(user_input_pane);
         user_input_pane.setLayout(user_input_layout);
@@ -70,40 +74,61 @@ public class WebCrawler extends JFrame {
         );
         add(user_input_pane, BorderLayout.PAGE_START);
 
-        html_text.setName("HtmlTextArea");
-        html_text.setEditable(false);
-        final var html_pane = new JScrollPane(html_text);
-        add(html_pane, BorderLayout.CENTER);
+        final var title_table_pane = new JScrollPane(title_table);
+        add(title_table_pane, BorderLayout.CENTER);
     }
 
-    private void initParser(JButton parse_button, JTextField site_url, JLabel title_label_text, JTextArea html_text) {
+    private void initParser(JButton parse_button, JTextField site_url, JLabel title_label_text, DefaultTableModel title_table_model) {
         parse_button.addActionListener(e -> {
             try {
                 final String url = site_url.getText();
 
                 final var inputStream = new URL(url).openStream();
                 final var reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
-                final var stringBuilder = new StringBuilder();
 
                 String nextLine;
-                var matched = new AtomicBoolean(false);
-                var p = Pattern.compile(".*<title>(.*)</title>.*");
+                String link;
+                var title_matched = new AtomicBoolean(false);
+                var title_pattern = Pattern.compile("(?Ui).*<title>(.*)</title>.*");
+                // TODO pattern match links
+                var href_pattern = Pattern.compile("(?Ui)<[^>]*\\s*href\\s*=\\s*(\"(?:[^\"]*\")|'[^']*'|(?:[^'\">\\s]+))[^>]*>.+?</[^>]+>");
                 while ((nextLine = reader.readLine()) != null) {
-                    stringBuilder.append(nextLine);
-                    stringBuilder.append(System.getProperty("line.separator"));
-                    var m = p.matcher(nextLine);
-                    if (!matched.get() && m.matches()) {
-                        matched.set(true);
-                        title_label_text.setText(m.group(1));
+                    var title_matcher = title_pattern.matcher(nextLine);
+                    if (!title_matched.get() && title_matcher.matches()) {
+                        title_matched.set(true);
+                        title_label_text.setText(title_matcher.group(1));
+                    }
+                    var href_matcher = href_pattern.matcher(nextLine);
+                    if (href_matcher.matches()) {
+                        // TODO add protocol
+                        link = href_matcher.group(1);
+                        String[] data = {link.substring(1, link.length() - 1), getLinkTitle(link)};
+                        title_table_model.addRow(data);
                     }
                 }
-
-                final var siteText = stringBuilder.toString();
-                html_text.setText(siteText);
             }
             catch (IOException error) {
-                html_text.setText("");
+                // TODO add error popup window
             }
         });
+    }
+
+    private String getLinkTitle(String url) {
+        try {
+            final var inputStream = new URL(url).openStream();
+            final var reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
+
+            String nextLine;
+            var title_pattern = Pattern.compile("(?Ui).*<title>(.*)</title>.*");
+            while ((nextLine = reader.readLine()) != null) {
+                System.out.println("made it");
+                var title_matcher = title_pattern.matcher(nextLine);
+                if (title_matcher.matches()) return title_matcher.group(1);
+            }
+        }
+        catch (IOException error) {
+            // TODO add error popup window
+        }
+        return "";
     }
 }
