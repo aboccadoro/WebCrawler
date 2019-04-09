@@ -5,7 +5,6 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.*;
 import java.net.URL;
-import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -113,12 +112,12 @@ public class WebCrawler extends JFrame {
                     title_table_model.removeRow(title_table_model.getRowCount() - 1);
                 }
                 final var url = url_text.getText();
-                var protocol_pattern = Pattern.compile("(?Ui)(.+)//.*");
+                var protocol_pattern = Pattern.compile("(?Ui)([^/]+?:)//.*");
                 var protocol_matcher = protocol_pattern.matcher(url);
                 if (!protocol_matcher.matches()) throw new IOException();
                 var protocol = protocol_matcher.group(1);
 
-                final URLConnection inputStream = new URL(url).openConnection();
+                final var inputStream = new URL(url).openConnection();
                 inputStream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
                 final var reader = new BufferedReader(new InputStreamReader(inputStream.getInputStream(), StandardCharsets.UTF_8));
 
@@ -140,34 +139,30 @@ public class WebCrawler extends JFrame {
                     var href_matcher = href_pattern.matcher(nextLine);
                     if (href_matcher.matches()) {
                         var link = href_matcher.group(2);
-                        var relative_pattern = Pattern.compile("(?Ui)([^/]+)");
+                        var relative_pattern = Pattern.compile("(?Ui)^([^/]+)");
                         var relative_matcher = relative_pattern.matcher(link);
                         var no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
                         var no_protocol_matcher = no_protocol_pattern.matcher(link);
-                        var nosource_slash_pattern = Pattern.compile("(?Ui)^/.+");
+                        var nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
                         var nosource_slash_matcher = nosource_slash_pattern.matcher(link);
-                        var nosource_noslash_pattern = Pattern.compile("(?Ui)^.+/.*");
+                        var nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
                         var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link);
-                        if (relative_matcher.matches()) {
-                            var stripped_source_link_pattern = Pattern.compile("(?Ui)(.+/)[^/]*");
-                            var stripped_source_link_matcher = stripped_source_link_pattern.matcher(url);
-                            if (stripped_source_link_matcher.matches()) link = stripped_source_link_matcher.group(1) + link;
+                        if (relative_matcher.matches() || (nosource_noslash_matcher.matches() && !link.contains(protocol))) {
+                            var index = url.lastIndexOf('/');
+                            if (url.charAt(index - 1) != '/') link = url.substring(0, index + 1) + link;
+                            else link = url + '/' + link;
                         }
                         else if (no_protocol_matcher.matches()) link = protocol + link;
                         else if (nosource_slash_matcher.matches()) {
-                            var stripped_source_link_pattern = Pattern.compile("(?Ui)(.+)/[^/]*");
-                            var stripped_source_link_matcher = stripped_source_link_pattern.matcher(url);
-                            if (stripped_source_link_matcher.matches()) link = stripped_source_link_matcher.group(1) + link;
-                        }
-                        else if (nosource_noslash_matcher.matches() && !link.contains(protocol)) {
-                            var stripped_source_link_pattern = Pattern.compile("(?Ui)(.+/)[^/]*");
-                            var stripped_source_link_matcher = stripped_source_link_pattern.matcher(url);
-                            if (stripped_source_link_matcher.matches()) link = stripped_source_link_matcher.group(1) + link;
+                            var index = url.lastIndexOf('/');
+                            if (url.charAt(index - 1) != '/') link = url.substring(0, index) + link;
+                            else link = url + link;
                         }
                         final var content = new URL(link).openConnection();
                         if (content.getContentType() != null) {
                             if (content.getContentType().contains("text/html")) {
-                                String[] data = {link, getLinkTitle(link)};
+                                var title = getLinkTitle(link);
+                                String[] data = {link, title};
                                 title_table_model.addRow(data);
                             }
                         }
@@ -177,6 +172,7 @@ public class WebCrawler extends JFrame {
             catch (IOException error) {
                 // TODO add error popup window
                 error.printStackTrace();
+                System.exit(-1);
             }
         });
     }
