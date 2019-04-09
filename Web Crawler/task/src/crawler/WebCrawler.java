@@ -3,12 +3,12 @@ package crawler;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.net.URL;
+import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 public class WebCrawler extends JFrame {
@@ -31,9 +31,15 @@ public class WebCrawler extends JFrame {
         final var title_table_model = new DefaultTableModel(column_names, 0);
         final var title_table = new JTable(title_table_model);
         title_table.setName("TitlesTable");
+        final var export_label = new JLabel("Export: ");
+        final var export_text = new JTextField();
+        export_text.setName("ExportUrlTextField");
+        final var export_button = new JButton("Save");
+        export_button.setName("ExportButton");
 
-        initUI(url_label, url_text, parse_button, title_label, title_label_text, title_table);
+        initUI(url_label, url_text, parse_button, title_label, title_label_text, title_table, export_label, export_text, export_button);
         initParser(parse_button, url_text, title_label_text, title_table_model);
+        initSave(export_text, export_button, title_table_model);
 
         pack();
         setSize(800, 600);
@@ -41,7 +47,7 @@ public class WebCrawler extends JFrame {
         title_table.disable();
     }
 
-    private void initUI(JLabel url_label, JTextField url_text, JButton parse_button, JLabel title_label, JLabel title_label_text, JTable title_table) {
+    private void initUI(JLabel url_label, JTextField url_text, JButton parse_button, JLabel title_label, JLabel title_label_text, JTable title_table, JLabel export_label, JTextField export_text, JButton export_button) {
         final var user_input_pane = new JPanel();
         final var user_input_layout = new GroupLayout(user_input_pane);
         user_input_pane.setLayout(user_input_layout);
@@ -75,6 +81,29 @@ public class WebCrawler extends JFrame {
 
         final var title_table_pane = new JScrollPane(title_table);
         add(title_table_pane, BorderLayout.CENTER);
+
+        final var export_input_pane = new JPanel();
+        final var export_input_layout = new GroupLayout(export_input_pane);
+        export_input_pane.setLayout(export_input_layout);
+        export_input_layout.setAutoCreateGaps(true);
+        export_input_layout.setAutoCreateContainerGaps(true);
+        export_input_layout.setHorizontalGroup(
+                export_input_layout.createSequentialGroup()
+                        .addComponent(export_label)
+                        .addComponent(export_text)
+                        .addGroup(export_input_layout.createParallelGroup(GroupLayout.Alignment.LEADING)
+                                .addComponent(export_button)
+                        )
+        );
+        export_input_layout.setVerticalGroup(
+                export_input_layout.createSequentialGroup()
+                        .addGroup(export_input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                                .addComponent(export_label)
+                                .addComponent(export_text)
+                                .addComponent(export_button)
+                        )
+        );
+        add(export_input_pane, BorderLayout.PAGE_END);
     }
 
     private void initParser(JButton parse_button, JTextField url_text, JLabel title_label_text, DefaultTableModel title_table_model) {
@@ -89,12 +118,13 @@ public class WebCrawler extends JFrame {
                 if (!protocol_matcher.matches()) throw new IOException();
                 var protocol = protocol_matcher.group(1);
 
-                final var inputStream = new URL(url).openStream();
-                final var reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
+                final URLConnection inputStream = new URL(url).openConnection();
+                inputStream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
+                final var reader = new BufferedReader(new InputStreamReader(inputStream.getInputStream(), StandardCharsets.UTF_8));
 
                 StringBuilder nextLine;
                 var title_pattern = Pattern.compile("(?Ui).*<title.*>(.*)</title>.*");
-                var title_tag_pattern = Pattern.compile("(?Ui).*<title.*>.*");
+                var title_tag_pattern = Pattern.compile("(?Ui).*<title[^>]*>.*");
                 var href_pattern = Pattern.compile("(?Ui).*<a\\s(?:[^>]+//s)?href=([\"'])([^\"']+)\\1[^>]*>(?:.+?</a>)?.*");
                 while ((nextLine = Optional.ofNullable(reader.readLine()).map(StringBuilder::new).orElse(null)) != null) {
                     var title_tag_matcher = title_tag_pattern.matcher(nextLine);
@@ -109,7 +139,6 @@ public class WebCrawler extends JFrame {
                     if (title_matcher.matches()) title_label_text.setText(title_matcher.group(1));
                     var href_matcher = href_pattern.matcher(nextLine);
                     if (href_matcher.matches()) {
-                        // TODO Fix href/src assembly
                         var link = href_matcher.group(2);
                         var relative_pattern = Pattern.compile("(?Ui)([^/]+)");
                         var relative_matcher = relative_pattern.matcher(link);
@@ -152,6 +181,28 @@ public class WebCrawler extends JFrame {
         });
     }
 
+    private void initSave(JTextField export_text, JButton export_button, DefaultTableModel title_table_model) {
+        export_button.addActionListener(e -> {
+            final var row_count = title_table_model.getRowCount();
+            try {
+                final var output = new OutputStreamWriter(new FileOutputStream(export_text.getText()), StandardCharsets.UTF_8);
+                final var row = new AtomicInteger();
+                while (row.get() < row_count) {
+                    output.write(title_table_model.getValueAt(row.get(), 0).toString());
+                    output.write("\n");
+                    output.write(title_table_model.getValueAt(row.get(), 1).toString());
+                    if (row.get() + 1 < row_count) output.write("\n");
+                    row.getAndIncrement();
+                }
+                output.close();
+            }
+            catch (IOException error) {
+                // TODO add error popup window
+                error.printStackTrace();
+            }
+        });
+    }
+
     private String getLinkTitle(String url) {
         try {
             final var inputStream = new URL(url).openStream();
@@ -159,7 +210,7 @@ public class WebCrawler extends JFrame {
 
             StringBuilder nextLine;
             var title_pattern = Pattern.compile("(?Ui).*<title.*>(.*)</title>.*");
-            var title_tag_pattern = Pattern.compile("(?Ui).*<title.*>.*");
+            var title_tag_pattern = Pattern.compile("(?Ui).*<title[^>]*>.*");
             while ((nextLine = Optional.ofNullable(reader.readLine()).map(StringBuilder::new).orElse(null)) != null) {
                 var title_tag_matcher = title_tag_pattern.matcher(nextLine);
                 if (title_tag_matcher.matches()) {
