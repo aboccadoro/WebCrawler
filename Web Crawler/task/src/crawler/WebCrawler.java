@@ -4,14 +4,21 @@ import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.*;
-import java.net.URL;
-import java.net.URLConnection;
+import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class WebCrawler extends JFrame {
+
+    private final Pattern relative_pattern = Pattern.compile("(?Ui)^([^/]+)");
+    private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
+    private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
+    private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
 
     public WebCrawler() {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -108,80 +115,73 @@ public class WebCrawler extends JFrame {
 
     private void initParser(JButton parse_button, JTextField url_text, JLabel title_label_text, DefaultTableModel title_table_model) {
         parse_button.addActionListener(e -> {
+            var buffered_input_stream = new AtomicReference<BufferedReader>();
             try {
                 while (title_table_model.getRowCount() > 0) {
                     title_table_model.removeRow(title_table_model.getRowCount() - 1);
                 }
 
                 final var url = url_text.getText();
-                final var input = new URL(url);
+                final var input = new URI(url).toURL();
                 var protocol = input.getProtocol();
                 final var input_stream = input.openConnection();
                 input_stream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
-                final var reader = new BufferedReader(new InputStreamReader(input_stream.getInputStream(), StandardCharsets.UTF_8));
+                buffered_input_stream.set(new BufferedReader(new InputStreamReader(input_stream.getInputStream(), StandardCharsets.UTF_8)));
 
                 StringBuilder nextLine;
 
+                // TODO fix multi line titles
                 var title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
-                var href_pattern = Pattern.compile("(?Ui).*<a\\s(?:[^>]+//s)?href=([\"'])([^\"']+)\\1[^>]*>(?:.+?</a>)?.*");
-                while ((nextLine = Optional.ofNullable(reader.readLine()).map(StringBuilder::new).orElse(null)) != null) {
-                    var title_matcher = title_pattern.matcher(nextLine);
-                    if (title_matcher.matches()) {
+                var href_pattern = Pattern.compile("(?Ui).*?<a\\s(?:[^>]+//s)?href=([\"'])([^\"']+)\\1[^>]*>(?:.+?</a>)?.*?");
+                while ((nextLine = Optional.ofNullable(buffered_input_stream.get().readLine()).map(StringBuilder::new).orElse(null)) != null) {
+                    var title_matcher = new AtomicReference<>(title_pattern.matcher(nextLine));
+                    if (title_matcher.get().matches()) {
                         while (!nextLine.toString().contains("</title>")) {
-                            var next = reader.readLine();
+                            var next = buffered_input_stream.get().readLine();
                             if (next != null) nextLine.append(next);
                             else throw new IOException("Invalid <title>: " + nextLine);
                         }
-                        title_label_text.setText(title_matcher.group(1));
+                        title_matcher.set(title_pattern.matcher(nextLine));
+                        if (title_matcher.get().matches()) title_label_text.setText(title_matcher.get().group(1));
                     }
                     var href_matcher = href_pattern.matcher(nextLine);
-                    if (href_matcher.matches()) {
-                        var link = href_matcher.group(2);
-                        var relative_pattern = Pattern.compile("(?Ui)^([^/]+)");
-                        var relative_matcher = relative_pattern.matcher(link);
-                        var no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
-                        var no_protocol_matcher = no_protocol_pattern.matcher(link);
-                        var nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
-                        var nosource_slash_matcher = nosource_slash_pattern.matcher(link);
-                        var nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
-                        var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link);
-                        URLConnection connection = null;
+                    while (href_matcher.find()) {
+                        var link = new AtomicReference<>(href_matcher.group(2));
+                        var validated = new AtomicBoolean(false);
+                        var connection = new AtomicReference<URLConnection>();
                         try {
-                            connection = new URL(link).openConnection();
+                            connection.set(new URI(link.get()).toURL().openConnection());
                         }
-                        catch (IOException error) {
-                            if (relative_matcher.matches() || nosource_noslash_matcher.matches()) {
-                                var index = url.lastIndexOf('/');
-                                if (url.charAt(index - 1) != '/') link = url.substring(0, index + 1) + link;
-                                else link = url + '/' + link;
-                            }
-                            else if (no_protocol_matcher.matches()) link = protocol + ':' + link;
-                            else if (nosource_slash_matcher.matches()) {
-                                var index = url.lastIndexOf('/');
-                                if (url.charAt(index - 1) != '/') link = url.substring(0, index) + link;
-                                else link = url + link;
-                            }
+                        catch (IOException | IllegalArgumentException | URISyntaxException error) {
+                            if (protocol.contains("http")) validateLink(link, url, protocol, validated);
                         }
                         finally {
                             try {
-                                if (connection == null) connection = new URL(link).openConnection();
-                                if (connection.getContentType().contains("text/html")) {
-                                    var title = getLinkTitle(link);
-                                    String[] data = {link, title};
-                                    title_table_model.addRow(data);
+                                if (validated.get()) connection.set(new URI(link.get()).toURL().openConnection());
+                                if (connection.get() != null) {
+                                    if (connection.get().getContentType().contains("text/html")) {
+                                        var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getURL().openStream()));
+                                        var title = getLinkTitle(buffered_link_input_stream);
+                                        buffered_link_input_stream.close();
+                                        String[] data = {link.get(), title};
+                                        title_table_model.addRow(data);
+                                    }
                                 }
                             }
-                            catch (IOException error) {
-                                // TODO add error popup window
-                                error.printStackTrace();
-                            }
+                            catch (IOException | IllegalArgumentException | URISyntaxException ignored) {}
                         }
                     }
                 }
             }
-            catch (IOException error) {
+            catch (IOException | IllegalArgumentException | URISyntaxException error) {
                 // TODO add error popup window
                 error.printStackTrace();
+            }
+            finally {
+                try {
+                    if (buffered_input_stream.get() != null) buffered_input_stream.get().close();
+                }
+                catch (IOException ignored) {}
             }
         });
     }
@@ -208,29 +208,45 @@ public class WebCrawler extends JFrame {
         });
     }
 
-    private String getLinkTitle(String url) {
-        try {
-            final var inputStream = new URL(url).openStream();
-            final var reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
-
-            StringBuilder nextLine;
-            var title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
-            while ((nextLine = Optional.ofNullable(reader.readLine()).map(StringBuilder::new).orElse(null)) != null) {
-                var title_matcher = title_pattern.matcher(nextLine);
-                if (title_matcher.matches()) {
-                    while (!nextLine.toString().contains("</title>")) {
-                        var next = reader.readLine();
-                        if (next != null) nextLine.append(next);
-                        else throw new IOException("Invalid <title>: " + nextLine);
-                    }
-                    return title_matcher.group(1);
+    private String getLinkTitle(BufferedReader buffered_link_input_stream) throws IOException {
+        StringBuilder nextLine;
+        var title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:(</title>).*?)?");
+        while ((nextLine = Optional.ofNullable(buffered_link_input_stream.readLine()).map(StringBuilder::new).orElse(null)) != null) {
+            AtomicReference<Matcher> title_matcher = new AtomicReference<>(title_pattern.matcher(nextLine));
+            if (title_matcher.get().matches()) {
+                while (!nextLine.toString().contains("</title>")) {
+                    var next = buffered_link_input_stream.readLine();
+                    if (next != null) nextLine.append(next);
+                    else throw new IOException("Invalid <title>: " + nextLine);
                 }
+                title_matcher.set(title_pattern.matcher(nextLine));
+                if (title_matcher.get().matches()) return title_matcher.get().group(1);
             }
         }
-        catch (IOException error) {
-            // TODO add error popup window
-            error.printStackTrace();
+        return"";
+    }
+
+
+    private void validateLink(AtomicReference<String> link, String url, String protocol, AtomicBoolean validated) {
+        var relative_matcher = relative_pattern.matcher(link.get());
+        var no_protocol_matcher = no_protocol_pattern.matcher(link.get());
+        var nosource_slash_matcher = nosource_slash_pattern.matcher(link.get());
+        var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link.get());
+        if (relative_matcher.matches() || nosource_noslash_matcher.matches()) {
+            var index = url.lastIndexOf('/');
+            if (url.charAt(index - 1) != '/') link.set(url.substring(0, index + 1) + link.get());
+            else link.set(url + '/' + link.get());
+            validated.set(true);
         }
-        return "";
+        else if (no_protocol_matcher.matches()) {
+            link.set(protocol + ':' + link.get());
+            validated.set(true);
+        }
+        else if (nosource_slash_matcher.matches()) {
+            var index = url.lastIndexOf('/');
+            if (url.charAt(index - 1) != '/') link.set(url.substring(0, index) + link.get());
+            else link.set(url + link.get());
+            validated.set(true);
+        }
     }
 }
