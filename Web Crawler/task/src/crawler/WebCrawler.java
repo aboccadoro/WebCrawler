@@ -5,6 +5,7 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.*;
 import java.net.*;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -15,6 +16,9 @@ import java.util.regex.Pattern;
 
 public class WebCrawler extends JFrame {
 
+    private final Pattern title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
+    private final Pattern charset_pattern = Pattern.compile("(?Ui)^.*?charset=([\\w-]+).*$");
+    private final Pattern href_pattern = Pattern.compile("(?Ui).*?<a\\s(?:[^>]+//s)?href=([\"'])([^\"']+)\\1[^>]*>(?:.+?</a>)?.*?");
     private final Pattern relative_pattern = Pattern.compile("(?Ui)^([^/]+)");
     private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
     private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
@@ -126,25 +130,24 @@ public class WebCrawler extends JFrame {
                 var protocol = input.getProtocol();
                 final var input_stream = input.openConnection();
                 input_stream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
-                buffered_input_stream.set(new BufferedReader(new InputStreamReader(input_stream.getInputStream(), StandardCharsets.UTF_8)));
+                var charset_matcher = new AtomicReference<>(charset_pattern.matcher(input_stream.getContentType()));
+                var charset = new AtomicReference<>(StandardCharsets.UTF_8);
+                if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                buffered_input_stream.set(new BufferedReader(new InputStreamReader(input_stream.getInputStream(), charset.get())));
+                var buffered_lines = buffered_input_stream.get().lines().toArray();
 
-                StringBuilder nextLine;
-
-                // TODO fix multi line titles
-                var title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
-                var href_pattern = Pattern.compile("(?Ui).*?<a\\s(?:[^>]+//s)?href=([\"'])([^\"']+)\\1[^>]*>(?:.+?</a>)?.*?");
-                while ((nextLine = Optional.ofNullable(buffered_input_stream.get().readLine()).map(StringBuilder::new).orElse(null)) != null) {
-                    var title_matcher = new AtomicReference<>(title_pattern.matcher(nextLine));
+                var i = new AtomicInteger(0);
+                while (i.get() < buffered_lines.length) {
+                    var html = new StringBuilder(buffered_lines[i.get()].toString());
+                    var title_matcher = new AtomicReference<>(title_pattern.matcher(buffered_lines[i.get()].toString()));
                     if (title_matcher.get().matches()) {
-                        while (!nextLine.toString().contains("</title>")) {
-                            var next = buffered_input_stream.get().readLine();
-                            if (next != null) nextLine.append(next);
-                            else throw new IOException("Invalid <title>: " + nextLine);
+                        while (!html.toString().contains("</title>")) {
+                            html.append(buffered_lines[i.getAndIncrement()].toString());
                         }
-                        title_matcher.set(title_pattern.matcher(nextLine));
+                        title_matcher.set(title_pattern.matcher(html.toString()));
                         if (title_matcher.get().matches()) title_label_text.setText(title_matcher.get().group(1));
                     }
-                    var href_matcher = href_pattern.matcher(nextLine);
+                    var href_matcher = href_pattern.matcher(html);
                     while (href_matcher.find()) {
                         var link = new AtomicReference<>(href_matcher.group(2));
                         var validated = new AtomicBoolean(false);
@@ -158,19 +161,22 @@ public class WebCrawler extends JFrame {
                         finally {
                             try {
                                 if (validated.get()) connection.set(new URI(link.get()).toURL().openConnection());
-                                if (connection.get() != null) {
-                                    if (connection.get().getContentType().contains("text/html")) {
-                                        var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getURL().openStream()));
-                                        var title = getLinkTitle(buffered_link_input_stream);
-                                        buffered_link_input_stream.close();
-                                        String[] data = {link.get(), title};
-                                        title_table_model.addRow(data);
-                                    }
+                                if (connection.get().getContentType().contains("text/html")) {
+                                    charset_matcher.set(charset_pattern.matcher(connection.get().getContentType()));
+                                    if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                    else charset.set(StandardCharsets.UTF_8);
+                                    var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getURL().openStream(), charset.get()));
+                                    var title = getLinkTitle(buffered_link_input_stream);
+                                    String[] data = {link.get(), title};
+                                    title_table_model.addRow(data);
+                                    System.out.println(link.get() + "   |   " + title);
+                                    buffered_link_input_stream.close();
                                 }
                             }
-                            catch (IOException | IllegalArgumentException | URISyntaxException ignored) {}
+                            catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException ignored) {}
                         }
                     }
+                    i.getAndIncrement();
                 }
             }
             catch (IOException | IllegalArgumentException | URISyntaxException error) {
@@ -226,7 +232,6 @@ public class WebCrawler extends JFrame {
         return"";
     }
 
-
     private void validateLink(AtomicReference<String> link, String url, String protocol, AtomicBoolean validated) {
         var relative_matcher = relative_pattern.matcher(link.get());
         var no_protocol_matcher = no_protocol_pattern.matcher(link.get());
@@ -248,5 +253,21 @@ public class WebCrawler extends JFrame {
             else link.set(url + link.get());
             validated.set(true);
         }
+    }
+
+    private Charset getCharSet(String match) {
+        switch (match) {
+            case "us-ascii":
+                return StandardCharsets.US_ASCII;
+            case "iso-8859-1":
+                return StandardCharsets.ISO_8859_1;
+            case "utf-16":
+                return StandardCharsets.UTF_16;
+            case "utf-16be":
+                return StandardCharsets.UTF_16BE;
+            case "utf-16le":
+                return StandardCharsets.UTF_16LE;
+        }
+        return StandardCharsets.UTF_8;
     }
 }
