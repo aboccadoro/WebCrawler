@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class WebCrawler extends JFrame {
+public class WebCrawler extends Thread {
 
     private final Pattern title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
     private final Pattern charset_pattern = Pattern.compile("(?Ui)^.*?charset=([\\w-]+).*$");
@@ -25,100 +25,173 @@ public class WebCrawler extends JFrame {
     private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
 
     public WebCrawler() {
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setLayout(new BorderLayout());
-        setTitle("Web Crawler");
-        setVisible(true);
+        JFrame frame = new JFrame();
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setLayout(new BorderLayout());
+        frame.setTitle("Web Crawler");
+        frame.setVisible(true);
 
-        final var url_label = new JLabel("URL:  ");
-        final var url_text = new JTextField("");
+        final var url_label = new JLabel("Start URL: ");
+        final var url_text = new JTextField();
         url_text.setName("UrlTextField");
-        final var parse_button = new JButton("Parse");
-        parse_button.setName("RunButton");
-        final var title_label = new JLabel("Title:  ");
-        final var title_label_text = new JLabel();
-        title_label_text.setName("TitleLabel");
-        final String[] column_names = {"URL", "Title"};
-        final var title_table_model = new DefaultTableModel(column_names, 0);
-        final var title_table = new JTable(title_table_model);
-        title_table.setName("TitlesTable");
+        final var run_button = new JToggleButton("Run");
+        run_button.setName("RunButton");
+        final var workers_label = new JLabel("Workers: ");
+        final var workers_text = new JTextField();
+        final var depth_label = new JLabel("Maximum depth:  ");
+        final var depth_text = new JTextField();
+        depth_text.setName("DepthTextField");
+        final var depth_toggle = new JCheckBox("Enabled");
+        depth_toggle.setName("DepthCheckBox");
+        final var time_limit_label = new JLabel("Time limit: ");
+        final var time_limit_text = new JTextField();
+        final var seconds_label = new JLabel("seconds");
+        final var time_limit_toggle = new JCheckBox("Enabled");
+        final var elapsed_time_label = new JLabel("Elapsed time: ");
+        final var elapsed_time_updater = new JLabel("0:00");
+        final var parsed_page_label = new JLabel("Parsed pages: ");
+        final var parsed_pages_updater = new JLabel("0");
+        parsed_pages_updater.setName("ParsedLabel");
         final var export_label = new JLabel("Export: ");
         final var export_text = new JTextField();
         export_text.setName("ExportUrlTextField");
-        final var export_button = new JButton("Save");
-        export_button.setName("ExportButton");
+        final var save_button = new JButton("Save");
+        save_button.setName("ExportButton");
 
-        initUI(url_label, url_text, parse_button, title_label, title_label_text, title_table, export_label, export_text, export_button);
-        initParser(parse_button, url_text, title_label_text, title_table_model);
-        initSave(export_text, export_button, title_table_model);
-
-        pack();
-        setSize(800, 600);
-
-        title_table.disable();
-    }
-
-    private void initUI(JLabel url_label, JTextField url_text, JButton parse_button, JLabel title_label, JLabel title_label_text, JTable title_table, JLabel export_label, JTextField export_text, JButton export_button) {
-        final var user_input_pane = new JPanel();
-        final var user_input_layout = new GroupLayout(user_input_pane);
-        user_input_pane.setLayout(user_input_layout);
-        user_input_layout.setAutoCreateGaps(true);
-        user_input_layout.setAutoCreateContainerGaps(true);
-        user_input_layout.setHorizontalGroup(
-                user_input_layout.createSequentialGroup()
-                        .addGroup(user_input_layout.createParallelGroup(GroupLayout.Alignment.LEADING)
-                                .addComponent(url_label)
-                                .addComponent(title_label)
-                        )
-                        .addGroup(user_input_layout.createParallelGroup(GroupLayout.Alignment.LEADING)
-                                .addComponent(url_text)
-                                .addComponent(title_label_text)
-                        )
-                        .addComponent(parse_button)
+        final var url_pane = new JPanel();
+        final var url_layout = new GroupLayout(url_pane);
+        url_pane.setLayout(url_layout);
+        url_layout.setAutoCreateGaps(true);
+        url_layout.setHorizontalGroup(
+                url_layout.createSequentialGroup()
+                        .addComponent(url_text)
+                        .addComponent(true, run_button)
         );
-        user_input_layout.setVerticalGroup(
-                user_input_layout.createSequentialGroup()
-                        .addGroup(user_input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
-                                .addComponent(url_label)
+        url_layout.setVerticalGroup(
+                url_layout.createSequentialGroup()
+                        .addGroup(url_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                                 .addComponent(url_text)
-                                .addComponent(parse_button)
-                        )
-                        .addGroup(user_input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
-                                .addComponent(title_label)
-                                .addComponent(title_label_text)
+                                .addComponent(run_button)
                         )
         );
-        add(user_input_pane, BorderLayout.PAGE_START);
-
-        final var title_table_pane = new JScrollPane(title_table);
-        add(title_table_pane, BorderLayout.CENTER);
-
-        final var export_input_pane = new JPanel();
-        final var export_input_layout = new GroupLayout(export_input_pane);
-        export_input_pane.setLayout(export_input_layout);
-        export_input_layout.setAutoCreateGaps(true);
-        export_input_layout.setAutoCreateContainerGaps(true);
-        export_input_layout.setHorizontalGroup(
-                export_input_layout.createSequentialGroup()
-                        .addComponent(export_label)
+        final var depth_pane = new JPanel();
+        final var depth_layout = new GroupLayout(depth_pane);
+        depth_pane.setLayout(depth_layout);
+        depth_layout.setAutoCreateGaps(true);
+        depth_layout.setHorizontalGroup(
+                depth_layout.createSequentialGroup()
+                        .addComponent(depth_text)
+                        .addComponent(depth_toggle)
+        );
+        depth_layout.setVerticalGroup(
+                depth_layout.createSequentialGroup()
+                        .addGroup(depth_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                                .addComponent(depth_text)
+                                .addComponent(depth_toggle)
+                        )
+        );
+        final var time_limit_pane = new JPanel();
+        final var time_limit_layout = new GroupLayout(time_limit_pane);
+        time_limit_pane.setLayout(time_limit_layout);
+        time_limit_layout.setAutoCreateGaps(true);
+        time_limit_layout.setHorizontalGroup(
+                time_limit_layout.createSequentialGroup()
+                        .addComponent(time_limit_text)
+                        .addComponent(seconds_label)
+                        .addComponent(time_limit_toggle)
+        );
+        time_limit_layout.setVerticalGroup(
+                time_limit_layout.createSequentialGroup()
+                        .addGroup(time_limit_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                                .addComponent(time_limit_text)
+                                .addComponent(seconds_label)
+                                .addComponent(time_limit_toggle)
+                        )
+        );
+        final var export_pane = new JPanel();
+        final var export_layout = new GroupLayout(export_pane);
+        export_pane.setLayout(export_layout);
+        export_layout.setAutoCreateGaps(true);
+        export_layout.setHorizontalGroup(
+                export_layout.createSequentialGroup()
                         .addComponent(export_text)
-                        .addGroup(export_input_layout.createParallelGroup(GroupLayout.Alignment.LEADING)
-                                .addComponent(export_button)
-                        )
+                        .addComponent(save_button)
         );
-        export_input_layout.setVerticalGroup(
-                export_input_layout.createSequentialGroup()
-                        .addGroup(export_input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
-                                .addComponent(export_label)
+        export_layout.setVerticalGroup(
+                export_layout.createSequentialGroup()
+                        .addGroup(export_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                                 .addComponent(export_text)
-                                .addComponent(export_button)
+                                .addComponent(save_button)
                         )
         );
-        add(export_input_pane, BorderLayout.PAGE_END);
+        final var input_pane = new JPanel();
+        final var input_layout = new GroupLayout(input_pane);
+        input_pane.setLayout(input_layout);
+        input_layout.setAutoCreateGaps(true);
+        input_layout.setAutoCreateContainerGaps(true);
+        input_layout.setHorizontalGroup(
+                input_layout.createSequentialGroup()
+                        .addGroup(input_layout.createParallelGroup()
+                                .addComponent(url_label)
+                                .addComponent(workers_label)
+                                .addComponent(depth_label)
+                                .addComponent(time_limit_label)
+                                .addComponent(elapsed_time_label)
+                                .addComponent(parsed_page_label)
+                                .addComponent(export_label)
+                        )
+                        .addGroup(input_layout.createParallelGroup()
+                                .addComponent(url_pane)
+                                .addComponent(workers_text)
+                                .addComponent(depth_pane)
+                                .addComponent(time_limit_pane)
+                                .addComponent(elapsed_time_updater)
+                                .addComponent(parsed_pages_updater)
+                                .addComponent(export_pane)
+                        )
+        );
+        input_layout.setVerticalGroup(
+                input_layout.createSequentialGroup()
+                        .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.CENTER)
+                                .addComponent(url_label)
+                                .addComponent(url_pane)
+                        )
+                        .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                                .addComponent(workers_label)
+                                .addComponent(workers_text)
+                        )
+                        .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.CENTER)
+                                .addComponent(depth_label)
+                                .addComponent(depth_pane)
+                        )
+                        .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.CENTER)
+                                .addComponent(time_limit_label)
+                                .addComponent(time_limit_pane)
+                        )
+                        .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                                .addComponent(elapsed_time_label)
+                                .addComponent(elapsed_time_updater)
+                        )
+                        .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                                .addComponent(parsed_page_label)
+                                .addComponent(parsed_pages_updater)
+                        )
+                        .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.CENTER)
+                                .addComponent(export_label)
+                                .addComponent(export_pane)
+                        )
+        );
+        frame.setContentPane(input_pane);
+
+//        initParser(run_button, url_text, title_label_text, title_table_model);
+//        initSave(export_text, export_button, title_table_model);
+
+        frame.pack();
+        frame.setSize(500, 250);
     }
 
-    private void initParser(JButton parse_button, JTextField url_text, JLabel title_label_text, DefaultTableModel title_table_model) {
-        parse_button.addActionListener(e -> {
+    private void initParser(JButton run_button, JTextField url_text, JLabel title_label_text, DefaultTableModel title_table_model) {
+        run_button.addActionListener(e -> {
             var buffered_input_stream = new AtomicReference<BufferedReader>();
             try {
                 while (title_table_model.getRowCount() > 0) {
@@ -222,8 +295,7 @@ public class WebCrawler extends JFrame {
             if (title_matcher.get().matches()) {
                 while (!nextLine.toString().contains("</title>")) {
                     var next = buffered_link_input_stream.readLine();
-                    if (next != null) nextLine.append(next);
-                    else throw new IOException("Invalid <title>: " + nextLine);
+                    nextLine.append(next);
                 }
                 title_matcher.set(title_pattern.matcher(nextLine));
                 if (title_matcher.get().matches()) return title_matcher.get().group(1);
