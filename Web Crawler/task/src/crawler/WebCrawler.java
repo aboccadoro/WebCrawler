@@ -1,20 +1,22 @@
 package crawler;
 
 import javax.swing.*;
-import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.Optional;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.Timer;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class WebCrawler extends Thread {
+public class WebCrawler {
 
     private final Pattern title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
     private final Pattern charset_pattern = Pattern.compile("(?Ui)^.*?charset=([\\w-]+).*$");
@@ -23,9 +25,11 @@ public class WebCrawler extends Thread {
     private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
     private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
     private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
+    private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
+    // TODO add a priority queue of unvisited, but crawled links
 
     public WebCrawler() {
-        JFrame frame = new JFrame();
+        final var frame = new JFrame();
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setLayout(new BorderLayout());
         frame.setTitle("Web Crawler");
@@ -49,7 +53,7 @@ public class WebCrawler extends Thread {
         final var time_limit_toggle = new JCheckBox("Enabled");
         final var elapsed_time_label = new JLabel("Elapsed time: ");
         final var elapsed_time_updater = new JLabel("0:00");
-        final var parsed_page_label = new JLabel("Parsed pages: ");
+        final var parsed_pages_label = new JLabel("Parsed pages: ");
         final var parsed_pages_updater = new JLabel("0");
         parsed_pages_updater.setName("ParsedLabel");
         final var export_label = new JLabel("Export: ");
@@ -65,7 +69,7 @@ public class WebCrawler extends Thread {
         url_layout.setHorizontalGroup(
                 url_layout.createSequentialGroup()
                         .addComponent(url_text)
-                        .addComponent(true, run_button)
+                        .addComponent(run_button)
         );
         url_layout.setVerticalGroup(
                 url_layout.createSequentialGroup()
@@ -137,7 +141,7 @@ public class WebCrawler extends Thread {
                                 .addComponent(depth_label)
                                 .addComponent(time_limit_label)
                                 .addComponent(elapsed_time_label)
-                                .addComponent(parsed_page_label)
+                                .addComponent(parsed_pages_label)
                                 .addComponent(export_label)
                         )
                         .addGroup(input_layout.createParallelGroup()
@@ -173,7 +177,7 @@ public class WebCrawler extends Thread {
                                 .addComponent(elapsed_time_updater)
                         )
                         .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
-                                .addComponent(parsed_page_label)
+                                .addComponent(parsed_pages_label)
                                 .addComponent(parsed_pages_updater)
                         )
                         .addGroup(input_layout.createParallelGroup(GroupLayout.Alignment.CENTER)
@@ -182,133 +186,178 @@ public class WebCrawler extends Thread {
                         )
         );
         frame.setContentPane(input_pane);
-
-//        initParser(run_button, url_text, title_label_text, title_table_model);
-//        initSave(export_text, export_button, title_table_model);
-
-        frame.pack();
         frame.setSize(500, 250);
+
+        run(run_button, url_text, depth_text, depth_toggle, time_limit_text,
+                time_limit_toggle, elapsed_time_updater, parsed_pages_updater);
+        save(export_text, save_button);
     }
 
-    private void initParser(JButton run_button, JTextField url_text, JLabel title_label_text, DefaultTableModel title_table_model) {
+    private void run(JToggleButton run_button, JTextField url_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text,
+                     JCheckBox time_limit_toggle, JLabel elapsed_time_updater, JLabel parsed_pages_updater) {
         run_button.addActionListener(e -> {
-            var buffered_input_stream = new AtomicReference<BufferedReader>();
+            if (!crawled_pages.isEmpty()) crawled_pages.clear();
+            elapsed_time_updater.setText("0:00");
+            parsed_pages_updater.setText("0");
+            final var buffered_input_stream = new AtomicReference<BufferedReader>();
+            final var time = new AtomicLong(0L);
+            time.set(0L);
+            final var timer_worker = new AtomicReference<SwingWorker<String, Object>>();
+            final var parser_worker = new AtomicReference<SwingWorker<String, Object>>();
+
             try {
-                while (title_table_model.getRowCount() > 0) {
-                    title_table_model.removeRow(title_table_model.getRowCount() - 1);
+                if (time_limit_toggle.isSelected()) {
+                    // TODO look into swing Timer
+                    final var timer = new AtomicReference<>(new Timer());
+                    final var formatter = new SimpleDateFormat("m:ss");
+
+                    timer_worker.set(new SwingWorker<>() {
+
+                        @Override
+                        protected String doInBackground() {
+                            timer.get().scheduleAtFixedRate(new TimerTask() {
+
+                                @Override
+                                public void run() {
+                                    // TODO cancel parser_worker after timeout
+                                    if (time.get() >= Long.parseLong(time_limit_text.getText()) * 1000L) super.cancel();
+                                    elapsed_time_updater.setText(formatter.format(time.get()));
+                                    time.set(time.get() + 1000L);
+                                }
+                            }, 0, 1000);
+                            return null;
+                        }
+                    });
+                    timer_worker.get().execute();
                 }
+                parser_worker.set(new SwingWorker<>() {
 
-                final var url = url_text.getText();
-                final var input = new URI(url).toURL();
-                var protocol = input.getProtocol();
-                final var input_stream = input.openConnection();
-                input_stream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
-                var charset_matcher = new AtomicReference<>(charset_pattern.matcher(input_stream.getContentType()));
-                var charset = new AtomicReference<>(StandardCharsets.UTF_8);
-                if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                buffered_input_stream.set(new BufferedReader(new InputStreamReader(input_stream.getInputStream(), charset.get())));
-                var buffered_lines = buffered_input_stream.get().lines().toArray();
+                    @Override
+                    protected String doInBackground() throws Exception {
+                        final var url = url_text.getText();
+                        final var input = new URI(url).toURL();
+                        final var protocol = input.getProtocol();
+                        final var input_stream = input.openConnection();
+                        input_stream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
+                        final var charset_matcher = new AtomicReference<>(charset_pattern.matcher(input_stream.getContentType()));
+                        final var charset = new AtomicReference<>(StandardCharsets.UTF_8);
+                        if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                        buffered_input_stream.set(new BufferedReader(new InputStreamReader(input_stream.getInputStream(), charset.get())));
+                        final var buffered_lines = buffered_input_stream.get().lines().toArray();
 
-                var i = new AtomicInteger(0);
-                while (i.get() < buffered_lines.length) {
-                    var html = new StringBuilder(buffered_lines[i.get()].toString());
-                    var title_matcher = new AtomicReference<>(title_pattern.matcher(buffered_lines[i.get()].toString()));
-                    if (title_matcher.get().matches()) {
-                        while (!html.toString().contains("</title>")) {
-                            html.append(buffered_lines[i.getAndIncrement()].toString());
-                        }
-                        title_matcher.set(title_pattern.matcher(html.toString()));
-                        if (title_matcher.get().matches()) title_label_text.setText(title_matcher.get().group(1));
-                    }
-                    var href_matcher = href_pattern.matcher(html);
-                    while (href_matcher.find()) {
-                        var link = new AtomicReference<>(href_matcher.group(2));
-                        var validated = new AtomicBoolean(false);
-                        var connection = new AtomicReference<URLConnection>();
-                        try {
-                            connection.set(new URI(link.get()).toURL().openConnection());
-                        }
-                        catch (IOException | IllegalArgumentException | URISyntaxException error) {
-                            if (protocol.contains("http")) validateLink(link, url, protocol, validated);
-                        }
-                        finally {
-                            try {
-                                if (validated.get()) connection.set(new URI(link.get()).toURL().openConnection());
-                                if (connection.get().getContentType().contains("text/html")) {
-                                    charset_matcher.set(charset_pattern.matcher(connection.get().getContentType()));
-                                    if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                    else charset.set(StandardCharsets.UTF_8);
-                                    var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getURL().openStream(), charset.get()));
-                                    var title = getLinkTitle(buffered_link_input_stream);
-                                    String[] data = {link.get(), title};
-                                    title_table_model.addRow(data);
-                                    System.out.println(link.get() + "   |   " + title);
-                                    buffered_link_input_stream.close();
+                        final var i = new AtomicInteger(0);
+                        while (i.get() < buffered_lines.length) {
+                            final var html = new StringBuilder(buffered_lines[i.get()].toString());
+                            final var title_matcher = new AtomicReference<>(title_pattern.matcher(buffered_lines[i.get()].toString()));
+                            if (title_matcher.get().matches()) {
+                                while (!html.toString().contains("</title>")) {
+                                    html.append(buffered_lines[i.getAndIncrement()].toString());
+                                }
+                                title_matcher.set(title_pattern.matcher(html.toString()));
+                                if (title_matcher.get().matches()) crawled_pages.put(url, title_matcher.get().group(1));
+                            }
+                            final var href_matcher = href_pattern.matcher(html);
+                            while (href_matcher.find()) {
+                                final var link = new AtomicReference<>(href_matcher.group(2));
+                                final var validated = new AtomicBoolean(false);
+                                final var connection = new AtomicReference<URLConnection>();
+                                try {
+                                    connection.set(new URI(link.get()).toURL().openConnection());
+                                }
+                                catch (IOException | IllegalArgumentException | URISyntaxException error) {
+                                    if (protocol.contains("http")) validateLink(link, url, protocol, validated);
+                                }
+                                finally {
+                                    try {
+                                        if (validated.get()) connection.set(new URI(link.get()).toURL().openConnection());
+                                        if (connection.get().getContentType().contains("text/html")) {
+                                            charset_matcher.set(charset_pattern.matcher(connection.get().getContentType()));
+                                            if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                            else charset.set(StandardCharsets.UTF_8);
+                                            final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getURL().openStream(), charset.get()));
+                                            final var title = getLinkTitle(buffered_link_input_stream);
+                                            // TODO make sure the link hasn't been seen already
+                                            crawled_pages.put(link.get(), title);
+                                            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                            buffered_link_input_stream.close();
+                                        }
+                                    }
+                                    catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException ignored) {}
                                 }
                             }
-                            catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException ignored) {}
+                            i.getAndIncrement();
                         }
+                        // TODO cancel timer_worker
+                        return null;
                     }
-                    i.getAndIncrement();
-                }
+                });
+                parser_worker.get().execute();
             }
-            catch (IOException | IllegalArgumentException | URISyntaxException error) {
+            catch (Exception error) {
                 // TODO add error popup window
                 error.printStackTrace();
             }
             finally {
+                run_button.setSelected(false);
                 try {
-                    if (buffered_input_stream.get() != null) buffered_input_stream.get().close();
+                    buffered_input_stream.get().close();
                 }
-                catch (IOException ignored) {}
+                catch (IOException | NullPointerException ignored) {}
             }
         });
     }
 
-    private void initSave(JTextField export_text, JButton export_button, DefaultTableModel title_table_model) {
+    private void save(JTextField export_text, JButton export_button) {
         export_button.addActionListener(e -> {
-            final var row_count = title_table_model.getRowCount();
-            try {
-                final var output = new OutputStreamWriter(new FileOutputStream(export_text.getText()), StandardCharsets.UTF_8);
-                final var row = new AtomicInteger();
-                while (row.get() < row_count) {
-                    output.write(title_table_model.getValueAt(row.get(), 0).toString());
-                    output.write("\n");
-                    output.write(title_table_model.getValueAt(row.get(), 1).toString());
-                    if (row.get() + 1 < row_count) output.write("\n");
-                    row.getAndIncrement();
+            final var save_worker = new SwingWorker<String, Object>() {
+
+                @Override
+                public String doInBackground() {
+                    try {
+                        final var output = new OutputStreamWriter(new FileOutputStream(export_text.getText()), StandardCharsets.UTF_8);
+                        final var i = new AtomicInteger(0);
+                        final var entry_count = crawled_pages.size();
+                        for (var entry : crawled_pages.entrySet()) {
+                            output.write(entry.getKey());
+                            output.write("\n");
+                            output.write(entry.getValue());
+                            if (i.getAndIncrement() + 1 < entry_count) output.write("\n");
+                        }
+                        output.close();
+                    }
+                    catch (IOException error) {
+                        // TODO add error popup window
+                        error.printStackTrace();
+                    }
+                    return null;
                 }
-                output.close();
-            }
-            catch (IOException error) {
-                // TODO add error popup window
-                error.printStackTrace();
-            }
+            };
+            save_worker.execute();
         });
     }
 
     private String getLinkTitle(BufferedReader buffered_link_input_stream) throws IOException {
         StringBuilder nextLine;
-        var title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:(</title>).*?)?");
+        final var title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:(</title>).*?)?");
         while ((nextLine = Optional.ofNullable(buffered_link_input_stream.readLine()).map(StringBuilder::new).orElse(null)) != null) {
             AtomicReference<Matcher> title_matcher = new AtomicReference<>(title_pattern.matcher(nextLine));
             if (title_matcher.get().matches()) {
                 while (!nextLine.toString().contains("</title>")) {
-                    var next = buffered_link_input_stream.readLine();
+                    final var next = buffered_link_input_stream.readLine();
                     nextLine.append(next);
                 }
                 title_matcher.set(title_pattern.matcher(nextLine));
                 if (title_matcher.get().matches()) return title_matcher.get().group(1);
             }
         }
-        return"";
+        return "";
     }
 
     private void validateLink(AtomicReference<String> link, String url, String protocol, AtomicBoolean validated) {
-        var relative_matcher = relative_pattern.matcher(link.get());
-        var no_protocol_matcher = no_protocol_pattern.matcher(link.get());
-        var nosource_slash_matcher = nosource_slash_pattern.matcher(link.get());
-        var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link.get());
+        final var relative_matcher = relative_pattern.matcher(link.get());
+        final var no_protocol_matcher = no_protocol_pattern.matcher(link.get());
+        final var nosource_slash_matcher = nosource_slash_pattern.matcher(link.get());
+        final var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link.get());
         if (relative_matcher.matches() || nosource_noslash_matcher.matches()) {
             var index = url.lastIndexOf('/');
             if (url.charAt(index - 1) != '/') link.set(url.substring(0, index + 1) + link.get());
@@ -320,7 +369,7 @@ public class WebCrawler extends Thread {
             validated.set(true);
         }
         else if (nosource_slash_matcher.matches()) {
-            var index = url.lastIndexOf('/');
+            final var index = url.lastIndexOf('/');
             if (url.charAt(index - 1) != '/') link.set(url.substring(0, index) + link.get());
             else link.set(url + link.get());
             validated.set(true);
