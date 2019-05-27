@@ -1,6 +1,8 @@
 package crawler;
 
+import javax.net.ssl.HttpsURLConnection;
 import javax.swing.*;
+import javax.swing.Timer;
 import java.awt.*;
 import java.io.*;
 import java.net.*;
@@ -8,15 +10,12 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.Timer;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class WebCrawler {
+class WebCrawler {
 
     private final Pattern title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
     private final Pattern charset_pattern = Pattern.compile("(?Ui)^.*?charset=([\\w-]+).*$");
@@ -26,9 +25,11 @@ public class WebCrawler {
     private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
     private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
     private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
+    private volatile ArrayList<String> queued_pages = new ArrayList<>();
+    private volatile ParserThread[] workers;
     // TODO add a priority queue of unvisited, but crawled links
 
-    public WebCrawler() {
+    WebCrawler() {
         final var frame = new JFrame();
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setLayout(new BorderLayout());
@@ -195,48 +196,45 @@ public class WebCrawler {
 
     private void run(JToggleButton run_button, JTextField url_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text,
                      JCheckBox time_limit_toggle, JLabel elapsed_time_updater, JLabel parsed_pages_updater) {
+        HttpsURLConnection.setDefaultHostnameVerifier((hostname, sslSession) -> hostname.equals("localhost"));
         run_button.addActionListener(e -> {
             if (!crawled_pages.isEmpty()) crawled_pages.clear();
             elapsed_time_updater.setText("0:00");
             parsed_pages_updater.setText("0");
             final var buffered_input_stream = new AtomicReference<BufferedReader>();
-            final var time = new AtomicLong(0L);
-            time.set(0L);
             final var timer_worker = new AtomicReference<SwingWorker<String, Object>>();
             final var parser_worker = new AtomicReference<SwingWorker<String, Object>>();
-
-            try {
-                if (time_limit_toggle.isSelected()) {
-                    // TODO look into swing Timer
-                    final var timer = new AtomicReference<>(new Timer());
-                    final var formatter = new SimpleDateFormat("m:ss");
-
-                    timer_worker.set(new SwingWorker<>() {
-
-                        @Override
-                        protected String doInBackground() {
-                            timer.get().scheduleAtFixedRate(new TimerTask() {
-
-                                @Override
-                                public void run() {
-                                    // TODO cancel parser_worker after timeout
-                                    if (time.get() >= Long.parseLong(time_limit_text.getText()) * 1000L) super.cancel();
-                                    elapsed_time_updater.setText(formatter.format(time.get()));
-                                    time.set(time.get() + 1000L);
-                                }
-                            }, 0, 1000);
-                            return null;
-                        }
-                    });
-                    timer_worker.get().execute();
+            final var formatter = new SimpleDateFormat("m:ss");
+            final var time = new AtomicLong(1000L);
+            final var timer = new Timer(1000, evt -> {
+                if (time.get() >= Long.parseLong(time_limit_text.getText()) * 1000L) {
+                    ((Timer)evt.getSource()).stop();
+                    parser_worker.get().cancel(true);
                 }
+                elapsed_time_updater.setText(formatter.format(time.get()));
+                time.set(time.get() + 1000L);
+            });
+            if (time_limit_toggle.isSelected()) {
+                timer_worker.set(new SwingWorker<>() {
+
+                    @Override
+                    protected String doInBackground() {
+                        timer.start();
+                        return null;
+                    }
+                });
+                timer_worker.get().execute();
+            }
+            final var max_depth = new AtomicInteger();
+            if (depth_toggle.isSelected()) max_depth.set(Integer.parseInt(depth_text.getText()));
+            try {
                 parser_worker.set(new SwingWorker<>() {
 
                     @Override
                     protected String doInBackground() throws Exception {
                         final var url = url_text.getText();
                         final var input = new URI(url).toURL();
-                        final var protocol = input.getProtocol();
+                        final var protocol = new AtomicReference<>(input.getProtocol());
                         final var input_stream = input.openConnection();
                         input_stream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
                         final var charset_matcher = new AtomicReference<>(charset_pattern.matcher(input_stream.getContentType()));
@@ -254,40 +252,137 @@ public class WebCrawler {
                                     html.append(buffered_lines[i.getAndIncrement()].toString());
                                 }
                                 title_matcher.set(title_pattern.matcher(html.toString()));
-                                if (title_matcher.get().matches()) crawled_pages.put(url, title_matcher.get().group(1));
+                                if (title_matcher.get().matches()) {
+                                    crawled_pages.put(url, title_matcher.get().group(1));
+                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                }
                             }
                             final var href_matcher = href_pattern.matcher(html);
-                            while (href_matcher.find()) {
+                            while (href_matcher.find() && !isCancelled()) {
                                 final var link = new AtomicReference<>(href_matcher.group(2));
-                                final var validated = new AtomicBoolean(false);
                                 final var connection = new AtomicReference<URLConnection>();
+                                link.set(validateLink(link, url, protocol.get()));
                                 try {
                                     connection.set(new URI(link.get()).toURL().openConnection());
-                                }
-                                catch (IOException | IllegalArgumentException | URISyntaxException error) {
-                                    if (protocol.contains("http")) validateLink(link, url, protocol, validated);
-                                }
-                                finally {
-                                    try {
-                                        if (validated.get()) connection.set(new URI(link.get()).toURL().openConnection());
-                                        if (connection.get().getContentType().contains("text/html")) {
-                                            charset_matcher.set(charset_pattern.matcher(connection.get().getContentType()));
-                                            if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                            else charset.set(StandardCharsets.UTF_8);
-                                            final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getURL().openStream(), charset.get()));
-                                            final var title = getLinkTitle(buffered_link_input_stream);
-                                            // TODO make sure the link hasn't been seen already
-                                            crawled_pages.put(link.get(), title);
-                                            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                    connection.get().setConnectTimeout(1000);
+                                    connection.get().setReadTimeout(1000);
+                                    final var content = new AtomicReference<>(connection.get().getContentType());
+                                    if (content.get().contains("text/html")) {
+                                        charset_matcher.set(charset_pattern.matcher(content.get()));
+                                        if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                        else charset.set(StandardCharsets.UTF_8);
+                                        // TODO make sure the link hasn't been seen already
+                                        if (!isCancelled() && !crawled_pages.containsKey(link.get())) {
+                                            final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
+                                            final var lines = buffered_link_input_stream.lines().toArray();
+                                            final var count = lines.length;
+                                            if (count == 0) {
+                                                buffered_link_input_stream.close();
+                                                throw new IOException();
+                                            }
+                                            crawled_pages.put(link.get(), getLinkTitle(lines));
                                             buffered_link_input_stream.close();
+                                            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
                                         }
                                     }
-                                    catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException ignored) {}
+                                }
+                                catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException change_protocol) {
+                                    try {
+                                        if (link.get().substring(0, link.get().indexOf("://")).equals("https")) protocol.set("http");
+                                        else protocol.set("https");
+                                        link.set(protocol + link.get().substring(link.get().indexOf("://")));
+                                        connection.set(new URI(link.get()).toURL().openConnection());
+                                        connection.get().setConnectTimeout(1000);
+                                        connection.get().setReadTimeout(1000);
+                                        final var content = new AtomicReference<>(connection.get().getContentType());
+                                        if (content.get().contains("text/html")) {
+                                            charset_matcher.set(charset_pattern.matcher(content.get()));
+                                            if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                            else charset.set(StandardCharsets.UTF_8);
+                                            // TODO make sure the link hasn't been seen already
+                                            if (!isCancelled() && !crawled_pages.containsKey(link.get())) {
+                                                final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
+                                                final var lines = buffered_link_input_stream.lines().toArray();
+                                                final var count = lines.length;
+                                                if (count == 0) {
+                                                    buffered_link_input_stream.close();
+                                                    throw new IOException();
+                                                }
+                                                crawled_pages.put(link.get(), getLinkTitle(lines));
+                                                buffered_link_input_stream.close();
+                                                parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                            }
+                                        }
+                                    }
+                                    catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException add_www) {
+                                        try {
+                                            if (link.get().substring(0, link.get().indexOf("://")).equals("https")) protocol.set("http");
+                                            else protocol.set("https");
+                                            link.set(protocol + link.get().substring(link.get().indexOf("://")));
+                                            if (link.get().contains("://www.")) throw new IOException();
+                                            link.set(link.get().substring(0, link.get().indexOf("://") + 3) + "www." + link.get().substring(link.get().indexOf("://") + 3));
+                                            connection.set(new URI(link.get()).toURL().openConnection());
+                                            connection.get().setConnectTimeout(1000);
+                                            connection.get().setReadTimeout(1000);
+                                            final var content = new AtomicReference<>(connection.get().getContentType());
+                                            if (content.get().contains("text/html")) {
+                                                charset_matcher.set(charset_pattern.matcher(content.get()));
+                                                if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                                else charset.set(StandardCharsets.UTF_8);
+                                                // TODO make sure the link hasn't been seen already
+                                                if (!isCancelled() && !crawled_pages.containsKey(link.get())) {
+                                                    final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
+                                                    final var lines = buffered_link_input_stream.lines().toArray();
+                                                    final var count = lines.length;
+                                                    if (count == 0) {
+                                                        buffered_link_input_stream.close();
+                                                        throw new IOException();
+                                                    }
+                                                    crawled_pages.put(link.get(), getLinkTitle(lines));
+                                                    buffered_link_input_stream.close();
+                                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                                }
+                                            }
+                                        }
+                                        catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException change_protocol_add_www) {
+                                            try {
+                                                if (!link.get().contains("://www.")) link.set(link.get().substring(0, link.get().indexOf("://") + 3) + "www." + link.get().substring(link.get().indexOf("://") + 3));
+                                                if (link.get().substring(0, link.get().indexOf("://")).equals("https")) protocol.set("http");
+                                                else protocol.set("https");
+                                                link.set(protocol + link.get().substring(link.get().indexOf("://")));
+                                                connection.set(new URI(link.get()).toURL().openConnection());
+                                                connection.get().setConnectTimeout(1000);
+                                                connection.get().setReadTimeout(1000);
+                                                final var content = new AtomicReference<>(connection.get().getContentType());
+                                                if (content.get().contains("text/html")) {
+                                                    charset_matcher.set(charset_pattern.matcher(content.get()));
+                                                    if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                                    else charset.set(StandardCharsets.UTF_8);
+                                                    // TODO make sure the link hasn't been seen already
+                                                    if (!isCancelled() && !crawled_pages.containsKey(link.get())) {
+                                                        final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
+                                                        final var lines = buffered_link_input_stream.lines().toArray();
+                                                        final var count = lines.length;
+                                                        if (count == 0) {
+                                                            buffered_link_input_stream.close();
+                                                            throw new IOException();
+                                                        }
+                                                        crawled_pages.put(link.get(), getLinkTitle(lines));
+                                                        buffered_link_input_stream.close();
+                                                        parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                                    }
+                                                }
+                                            }
+                                            catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException bad_url) {
+                                                bad_url.printStackTrace();
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             i.getAndIncrement();
                         }
-                        // TODO cancel timer_worker
+                        if (time_limit_toggle.isSelected()) timer.stop();
                         return null;
                     }
                 });
@@ -315,13 +410,11 @@ public class WebCrawler {
                 public String doInBackground() {
                     try {
                         final var output = new OutputStreamWriter(new FileOutputStream(export_text.getText()), StandardCharsets.UTF_8);
-                        final var i = new AtomicInteger(0);
-                        final var entry_count = crawled_pages.size();
                         for (var entry : crawled_pages.entrySet()) {
                             output.write(entry.getKey());
                             output.write("\n");
                             output.write(entry.getValue());
-                            if (i.getAndIncrement() + 1 < entry_count) output.write("\n");
+                            output.write("\n");
                         }
                         output.close();
                     }
@@ -336,14 +429,15 @@ public class WebCrawler {
         });
     }
 
-    private String getLinkTitle(BufferedReader buffered_link_input_stream) throws IOException {
+    private String getLinkTitle(Object[] lines) {
         StringBuilder nextLine;
-        final var title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:(</title>).*?)?");
-        while ((nextLine = Optional.ofNullable(buffered_link_input_stream.readLine()).map(StringBuilder::new).orElse(null)) != null) {
-            AtomicReference<Matcher> title_matcher = new AtomicReference<>(title_pattern.matcher(nextLine));
+        final var i = new AtomicInteger(0);
+        while (i.get() < lines.length) {
+            nextLine = new StringBuilder((String)lines[i.getAndIncrement()]);
+            final var title_matcher = new AtomicReference<>(title_pattern.matcher(nextLine));
             if (title_matcher.get().matches()) {
-                while (!nextLine.toString().contains("</title>")) {
-                    final var next = buffered_link_input_stream.readLine();
+                while (!nextLine.toString().toLowerCase().contains("</title>")) {
+                    final var next = (String)lines[i.getAndIncrement()];
                     nextLine.append(next);
                 }
                 title_matcher.set(title_pattern.matcher(nextLine));
@@ -353,31 +447,29 @@ public class WebCrawler {
         return "";
     }
 
-    private void validateLink(AtomicReference<String> link, String url, String protocol, AtomicBoolean validated) {
+    private String validateLink(AtomicReference<String> link, String url, String protocol) {
         final var relative_matcher = relative_pattern.matcher(link.get());
         final var no_protocol_matcher = no_protocol_pattern.matcher(link.get());
         final var nosource_slash_matcher = nosource_slash_pattern.matcher(link.get());
         final var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link.get());
-        if (relative_matcher.matches() || nosource_noslash_matcher.matches()) {
+        if (relative_matcher.matches() || (nosource_noslash_matcher.matches() && !link.get().contains("://"))) {
             var index = url.lastIndexOf('/');
             if (url.charAt(index - 1) != '/') link.set(url.substring(0, index + 1) + link.get());
             else link.set(url + '/' + link.get());
-            validated.set(true);
         }
         else if (no_protocol_matcher.matches()) {
             link.set(protocol + ':' + link.get());
-            validated.set(true);
         }
         else if (nosource_slash_matcher.matches()) {
             final var index = url.lastIndexOf('/');
             if (url.charAt(index - 1) != '/') link.set(url.substring(0, index) + link.get());
             else link.set(url + link.get());
-            validated.set(true);
         }
+        return link.get();
     }
 
     private Charset getCharSet(String match) {
-        switch (match) {
+        switch (match.toLowerCase()) {
             case "us-ascii":
                 return StandardCharsets.US_ASCII;
             case "iso-8859-1":
@@ -390,5 +482,25 @@ public class WebCrawler {
                 return StandardCharsets.UTF_16LE;
         }
         return StandardCharsets.UTF_8;
+    }
+
+    public class ParserThread implements Runnable {
+
+        private JTextField url_text;
+        private JTextField depth_text;
+        private JLabel elapsed_time_updater;
+        private JLabel parsed_pages_updater;
+
+        public ParserThread(JTextField url_text, JTextField depth_text, JLabel elapsed_time_updater, JLabel parsed_pages_updater) {
+            this.url_text = url_text;
+            this.depth_text = depth_text;
+            this.elapsed_time_updater = elapsed_time_updater;
+            this.parsed_pages_updater = parsed_pages_updater;
+        }
+
+        @Override
+        public void run() {
+
+        }
     }
 }
