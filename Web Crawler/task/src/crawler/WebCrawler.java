@@ -10,6 +10,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -24,10 +25,11 @@ class WebCrawler {
     private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
     private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
     private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
+    private volatile boolean kill_all = false;
+    private volatile boolean waiting = true;
+    private volatile JLabel parsed_pages_updater = new JLabel("0");
     private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
-    private volatile ArrayList<String> queued_pages = new ArrayList<>();
-    private volatile ParserThread[] workers;
-    // TODO add a priority queue of unvisited, but crawled links
+    private volatile ArrayBlockingQueue<Runnable> tasks = new ArrayBlockingQueue<>(10000);
 
     WebCrawler() {
         final var frame = new JFrame();
@@ -55,7 +57,6 @@ class WebCrawler {
         final var elapsed_time_label = new JLabel("Elapsed time: ");
         final var elapsed_time_updater = new JLabel("0:00");
         final var parsed_pages_label = new JLabel("Parsed pages: ");
-        final var parsed_pages_updater = new JLabel("0");
         parsed_pages_updater.setName("ParsedLabel");
         final var export_label = new JLabel("Export: ");
         final var export_text = new JTextField();
@@ -189,221 +190,93 @@ class WebCrawler {
         frame.setContentPane(input_pane);
         frame.setSize(500, 250);
 
-        run(run_button, url_text, depth_text, depth_toggle, time_limit_text,
-                time_limit_toggle, elapsed_time_updater, parsed_pages_updater);
+        run(run_button, url_text, workers_text, depth_text, depth_toggle, time_limit_text,
+                time_limit_toggle, elapsed_time_updater);
         save(export_text, save_button);
     }
 
-    private void run(JToggleButton run_button, JTextField url_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text,
-                     JCheckBox time_limit_toggle, JLabel elapsed_time_updater, JLabel parsed_pages_updater) {
+    private void run(JToggleButton run_button, JTextField url_text, JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text,
+                     JCheckBox time_limit_toggle, JLabel elapsed_time_updater) {
         HttpsURLConnection.setDefaultHostnameVerifier((hostname, sslSession) -> hostname.equals("localhost"));
-        run_button.addActionListener(e -> {
-            if (!crawled_pages.isEmpty()) crawled_pages.clear();
-            elapsed_time_updater.setText("0:00");
-            parsed_pages_updater.setText("0");
-            final var buffered_input_stream = new AtomicReference<BufferedReader>();
-            final var timer_worker = new AtomicReference<SwingWorker<String, Object>>();
-            final var parser_worker = new AtomicReference<SwingWorker<String, Object>>();
-            final var formatter = new SimpleDateFormat("m:ss");
-            final var time = new AtomicLong(1000L);
-            final var timer = new Timer(1000, evt -> {
-                if (time.get() >= Long.parseLong(time_limit_text.getText()) * 1000L) {
-                    ((Timer)evt.getSource()).stop();
-                    parser_worker.get().cancel(true);
-                }
-                elapsed_time_updater.setText(formatter.format(time.get()));
-                time.set(time.get() + 1000L);
-            });
-            if (time_limit_toggle.isSelected()) {
-                timer_worker.set(new SwingWorker<>() {
-
-                    @Override
-                    protected String doInBackground() {
-                        timer.start();
-                        return null;
-                    }
-                });
-                timer_worker.get().execute();
-            }
-            final var max_depth = new AtomicInteger();
-            if (depth_toggle.isSelected()) max_depth.set(Integer.parseInt(depth_text.getText()));
-            try {
-                parser_worker.set(new SwingWorker<>() {
-
-                    @Override
-                    protected String doInBackground() throws Exception {
-                        final var url = url_text.getText();
-                        final var input = new URI(url).toURL();
-                        final var protocol = new AtomicReference<>(input.getProtocol());
-                        final var input_stream = input.openConnection();
-                        input_stream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
-                        final var charset_matcher = new AtomicReference<>(charset_pattern.matcher(input_stream.getContentType()));
-                        final var charset = new AtomicReference<>(StandardCharsets.UTF_8);
-                        if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                        buffered_input_stream.set(new BufferedReader(new InputStreamReader(input_stream.getInputStream(), charset.get())));
-                        final var buffered_lines = buffered_input_stream.get().lines().toArray();
-
-                        final var i = new AtomicInteger(0);
-                        while (i.get() < buffered_lines.length) {
-                            final var html = new StringBuilder(buffered_lines[i.get()].toString());
-                            final var title_matcher = new AtomicReference<>(title_pattern.matcher(buffered_lines[i.get()].toString()));
-                            if (title_matcher.get().matches()) {
-                                while (!html.toString().contains("</title>")) {
-                                    html.append(buffered_lines[i.getAndIncrement()].toString());
-                                }
-                                title_matcher.set(title_pattern.matcher(html.toString()));
-                                if (title_matcher.get().matches()) {
-                                    crawled_pages.put(url, title_matcher.get().group(1));
-                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                }
-                            }
-                            final var href_matcher = href_pattern.matcher(html);
-                            while (href_matcher.find() && !isCancelled()) {
-                                final var link = new AtomicReference<>(href_matcher.group(2));
-                                final var connection = new AtomicReference<URLConnection>();
-                                link.set(validateLink(link, url, protocol.get()));
-                                try {
-                                    connection.set(new URI(link.get()).toURL().openConnection());
-                                    connection.get().setConnectTimeout(1000);
-                                    connection.get().setReadTimeout(1000);
-                                    final var content = new AtomicReference<>(connection.get().getContentType());
-                                    if (content.get().contains("text/html")) {
-                                        charset_matcher.set(charset_pattern.matcher(content.get()));
-                                        if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                        else charset.set(StandardCharsets.UTF_8);
-                                        // TODO make sure the link hasn't been seen already
-                                        if (!isCancelled() && !crawled_pages.containsKey(link.get())) {
-                                            final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
-                                            final var lines = buffered_link_input_stream.lines().toArray();
-                                            final var count = lines.length;
-                                            if (count == 0) {
-                                                buffered_link_input_stream.close();
-                                                throw new IOException();
-                                            }
-                                            crawled_pages.put(link.get(), getLinkTitle(lines));
-                                            buffered_link_input_stream.close();
-                                            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                        }
-                                    }
-                                }
-                                catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException change_protocol) {
-                                    try {
-                                        if (link.get().substring(0, link.get().indexOf("://")).equals("https")) protocol.set("http");
-                                        else protocol.set("https");
-                                        link.set(protocol + link.get().substring(link.get().indexOf("://")));
-                                        connection.set(new URI(link.get()).toURL().openConnection());
-                                        connection.get().setConnectTimeout(1000);
-                                        connection.get().setReadTimeout(1000);
-                                        final var content = new AtomicReference<>(connection.get().getContentType());
-                                        if (content.get().contains("text/html")) {
-                                            charset_matcher.set(charset_pattern.matcher(content.get()));
-                                            if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                            else charset.set(StandardCharsets.UTF_8);
-                                            // TODO make sure the link hasn't been seen already
-                                            if (!isCancelled() && !crawled_pages.containsKey(link.get())) {
-                                                final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
-                                                final var lines = buffered_link_input_stream.lines().toArray();
-                                                final var count = lines.length;
-                                                if (count == 0) {
-                                                    buffered_link_input_stream.close();
-                                                    throw new IOException();
-                                                }
-                                                crawled_pages.put(link.get(), getLinkTitle(lines));
-                                                buffered_link_input_stream.close();
-                                                parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                            }
-                                        }
-                                    }
-                                    catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException add_www) {
-                                        try {
-                                            if (link.get().substring(0, link.get().indexOf("://")).equals("https")) protocol.set("http");
-                                            else protocol.set("https");
-                                            link.set(protocol + link.get().substring(link.get().indexOf("://")));
-                                            if (link.get().contains("://www.")) throw new IOException();
-                                            link.set(link.get().substring(0, link.get().indexOf("://") + 3) + "www." + link.get().substring(link.get().indexOf("://") + 3));
-                                            connection.set(new URI(link.get()).toURL().openConnection());
-                                            connection.get().setConnectTimeout(1000);
-                                            connection.get().setReadTimeout(1000);
-                                            final var content = new AtomicReference<>(connection.get().getContentType());
-                                            if (content.get().contains("text/html")) {
-                                                charset_matcher.set(charset_pattern.matcher(content.get()));
-                                                if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                                else charset.set(StandardCharsets.UTF_8);
-                                                // TODO make sure the link hasn't been seen already
-                                                if (!isCancelled() && !crawled_pages.containsKey(link.get())) {
-                                                    final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
-                                                    final var lines = buffered_link_input_stream.lines().toArray();
-                                                    final var count = lines.length;
-                                                    if (count == 0) {
-                                                        buffered_link_input_stream.close();
-                                                        throw new IOException();
-                                                    }
-                                                    crawled_pages.put(link.get(), getLinkTitle(lines));
-                                                    buffered_link_input_stream.close();
-                                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                                }
-                                            }
-                                        }
-                                        catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException change_protocol_add_www) {
-                                            try {
-                                                if (!link.get().contains("://www.")) link.set(link.get().substring(0, link.get().indexOf("://") + 3) + "www." + link.get().substring(link.get().indexOf("://") + 3));
-                                                if (link.get().substring(0, link.get().indexOf("://")).equals("https")) protocol.set("http");
-                                                else protocol.set("https");
-                                                link.set(protocol + link.get().substring(link.get().indexOf("://")));
-                                                connection.set(new URI(link.get()).toURL().openConnection());
-                                                connection.get().setConnectTimeout(1000);
-                                                connection.get().setReadTimeout(1000);
-                                                final var content = new AtomicReference<>(connection.get().getContentType());
-                                                if (content.get().contains("text/html")) {
-                                                    charset_matcher.set(charset_pattern.matcher(content.get()));
-                                                    if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                                    else charset.set(StandardCharsets.UTF_8);
-                                                    // TODO make sure the link hasn't been seen already
-                                                    if (!isCancelled() && !crawled_pages.containsKey(link.get())) {
-                                                        final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
-                                                        final var lines = buffered_link_input_stream.lines().toArray();
-                                                        final var count = lines.length;
-                                                        if (count == 0) {
-                                                            buffered_link_input_stream.close();
-                                                            throw new IOException();
-                                                        }
-                                                        crawled_pages.put(link.get(), getLinkTitle(lines));
-                                                        buffered_link_input_stream.close();
-                                                        parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                                    }
-                                                }
-                                            }
-                                            catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException bad_url) {
-                                                bad_url.printStackTrace();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            i.getAndIncrement();
-                        }
-                        if (time_limit_toggle.isSelected()) timer.stop();
-                        return null;
-                    }
-                });
-                parser_worker.get().execute();
-            }
-            catch (Exception error) {
-                // TODO add error popup window
-                error.printStackTrace();
-            }
-            finally {
+        final var timer_worker = Executors.newSingleThreadExecutor();
+        final var parser_worker = Executors.newSingleThreadExecutor();
+        final var formatter = new SimpleDateFormat("m:ss");
+        final var time = new AtomicLong(1000L);
+        final var timer = new AtomicReference<Timer>();
+        final var max_depth = new AtomicInteger(1);
+        final var workers = new AtomicReference<ThreadPoolExecutor>();
+        final var worker_count = new AtomicInteger(0);
+        run_button.addItemListener(e -> {
+            if (run_button.getText().equals("Run") && run_button.isSelected()) {
+                run_button.setText("Stop");
                 run_button.setSelected(false);
-                try {
-                    buffered_input_stream.get().close();
+                kill_all = false;
+                if (!crawled_pages.isEmpty()) crawled_pages.clear();
+                elapsed_time_updater.setText("0:00");
+                parsed_pages_updater.setText("0");
+                if (time_limit_toggle.isSelected()) {
+                    time.set(1000L);
+                    if (timer.get() == null) {
+                        timer.set(new Timer(1000, evt -> {
+                            if (time.get() >= Long.parseLong(time_limit_text.getText()) * 1000L) {
+                                kill_all = true;
+                                ((Timer)evt.getSource()).stop();
+                            }
+                            elapsed_time_updater.setText(formatter.format(time.get()));
+                            time.set(time.get() + 1000L);
+                        }));
+                    }
+                    else timer.get().stop();
+                    timer_worker.submit(() -> {
+                        timer.get().restart();
+                        return null;
+                    });
                 }
-                catch (IOException | NullPointerException ignored) {}
+                if (depth_toggle.isSelected()) max_depth.set(Integer.parseInt(depth_text.getText()));
+                try {
+                    parser_worker.submit(() -> {
+                        worker_count.set(Integer.parseInt(workers_text.getText()));
+                        if (workers.get() == null) workers.set((ThreadPoolExecutor)Executors.newFixedThreadPool(worker_count.get()));
+                        else if (workers.get().getCorePoolSize() != worker_count.get()) {
+                            if (worker_count.get() > workers.get().getMaximumPoolSize()) workers.get().setMaximumPoolSize(worker_count.get());
+                            workers.get().setCorePoolSize(worker_count.get());
+                        }
+                        workers.get().submit(new Task(url_text.getText()));
+                        waiting = true;
+                        if (!tasks.isEmpty()) tasks.clear();
+                        while (!tasks.isEmpty() || workers.get().getActiveCount() != 0 || waiting) {
+                            if (kill_all) {
+                                workers.get().getQueue().clear();
+                                tasks.clear();
+                                break;
+                            }
+                            if (!tasks.isEmpty()) workers.get().submit(tasks.remove());
+                        }
+                        System.out.println(Thread.activeCount() + " active threads");
+                        if (time_limit_toggle.isSelected()) timer.get().stop();
+                        run_button.setText("Run");
+                        return null;
+                    });
+                }
+                catch (Exception error) {
+                    // TODO add error popup window
+                    error.printStackTrace();
+                }
+            }
+            else if (run_button.getText().equals("Stop") && run_button.isSelected()) {
+                kill_all = true;
+                workers.get().getQueue().clear();
+                tasks.clear();
+                if (timer.get() != null && time_limit_toggle.isSelected()) timer.get().stop();
+                run_button.setText("Run");
+                run_button.setSelected(false);
             }
         });
     }
 
     private void save(JTextField export_text, JButton export_button) {
         export_button.addActionListener(e -> {
+            export_button.setSelected(false);
             final var save_worker = new SwingWorker<String, Object>() {
 
                 @Override
@@ -411,10 +284,8 @@ class WebCrawler {
                     try {
                         final var output = new OutputStreamWriter(new FileOutputStream(export_text.getText()), StandardCharsets.UTF_8);
                         for (var entry : crawled_pages.entrySet()) {
-                            output.write(entry.getKey());
-                            output.write("\n");
-                            output.write(entry.getValue());
-                            output.write("\n");
+                            output.write(entry.getKey() + "\n");
+                            output.write(entry.getValue() + "\n");
                         }
                         output.close();
                     }
@@ -457,9 +328,7 @@ class WebCrawler {
             if (url.charAt(index - 1) != '/') link.set(url.substring(0, index + 1) + link.get());
             else link.set(url + '/' + link.get());
         }
-        else if (no_protocol_matcher.matches()) {
-            link.set(protocol + ':' + link.get());
-        }
+        else if (no_protocol_matcher.matches()) link.set(protocol + ':' + link.get());
         else if (nosource_slash_matcher.matches()) {
             final var index = url.lastIndexOf('/');
             if (url.charAt(index - 1) != '/') link.set(url.substring(0, index) + link.get());
@@ -484,23 +353,182 @@ class WebCrawler {
         return StandardCharsets.UTF_8;
     }
 
-    public class ParserThread implements Runnable {
+    class Task implements Runnable {
 
-        private JTextField url_text;
-        private JTextField depth_text;
-        private JLabel elapsed_time_updater;
-        private JLabel parsed_pages_updater;
+        private String url;
 
-        public ParserThread(JTextField url_text, JTextField depth_text, JLabel elapsed_time_updater, JLabel parsed_pages_updater) {
-            this.url_text = url_text;
-            this.depth_text = depth_text;
-            this.elapsed_time_updater = elapsed_time_updater;
-            this.parsed_pages_updater = parsed_pages_updater;
+        private Task(String url) {
+            this.url = url;
         }
 
         @Override
         public void run() {
+            try {
+                System.out.println(Thread.currentThread().getName() + " started => " + url);
+                final var input = new URI(url).toURL();
+                final var protocol = new AtomicReference<>(input.getProtocol());
+                final var input_stream = input.openConnection();
+                input_stream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
+                final var charset_matcher = new AtomicReference<>(charset_pattern.matcher(input_stream.getContentType()));
+                final var charset = new AtomicReference<>(StandardCharsets.UTF_8);
+                if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                final var buffered_input_stream = new BufferedReader(new InputStreamReader(input_stream.getInputStream(), charset.get()));
+                final var buffered_lines = buffered_input_stream.lines().toArray();
 
+                final var i = new AtomicInteger(0);
+                while (i.get() < buffered_lines.length) {
+                    final var html = new StringBuilder(buffered_lines[i.get()].toString());
+                    final var title_matcher = new AtomicReference<>(title_pattern.matcher(buffered_lines[i.get()].toString()));
+                    if (title_matcher.get().matches() && crawled_pages.isEmpty()) {
+                        while (!html.toString().contains("</title>")) {
+                            html.append(buffered_lines[i.getAndIncrement()].toString());
+                        }
+                        title_matcher.set(title_pattern.matcher(html.toString()));
+                        if (title_matcher.get().matches()) {
+                            crawled_pages.put(url, title_matcher.get().group(1));
+                            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                        }
+                    }
+                    final var href_matcher = href_pattern.matcher(html);
+                    while (!kill_all && href_matcher.find()) {
+                        final var link = new AtomicReference<>(href_matcher.group(2));
+                        final var connection = new AtomicReference<URLConnection>();
+                        link.set(validateLink(link, url, protocol.get()));
+                        final var original_link = link.get();
+                        try {
+                            connection.set(new URI(link.get()).toURL().openConnection());
+                            connection.get().setConnectTimeout(1000);
+                            connection.get().setReadTimeout(2000);
+                            final var content = new AtomicReference<>(connection.get().getContentType());
+                            if (content.get().contains("text/html")) {
+                                charset_matcher.set(charset_pattern.matcher(content.get()));
+                                if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                else charset.set(StandardCharsets.UTF_8);
+                                if (!kill_all && !crawled_pages.containsKey(link.get())) {
+                                    final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
+                                    final var lines = buffered_link_input_stream.lines().toArray();
+                                    final var count = lines.length;
+                                    if (count == 0) {
+                                        buffered_link_input_stream.close();
+                                        throw new IOException();
+                                    }
+                                    final var title = getLinkTitle(lines);
+                                    if (title.equals("")) throw new IOException();
+                                    crawled_pages.put(link.get(), title);
+                                    tasks.put(new Task(link.get()));
+                                    if (waiting) waiting = false;
+                                    buffered_link_input_stream.close();
+                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                }
+                            }
+                        }
+                        catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException change_protocol) {
+                            try {
+                                if (link.get().substring(0, link.get().indexOf("://")).equals("http")) link.set("https" + link.get().substring(4));
+                                else link.set("http" + link.get().substring(5));
+                                connection.set(new URI(link.get()).toURL().openConnection());
+                                connection.get().setConnectTimeout(1000);
+                                connection.get().setReadTimeout(2000);
+                                final var content = new AtomicReference<>(connection.get().getContentType());
+                                if (content.get().contains("text/html")) {
+                                    charset_matcher.set(charset_pattern.matcher(content.get()));
+                                    if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                    else charset.set(StandardCharsets.UTF_8);
+                                    if (!kill_all && !crawled_pages.containsKey(link.get())) {
+                                        final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
+                                        final var lines = buffered_link_input_stream.lines().toArray();
+                                        final var count = lines.length;
+                                        if (count == 0) {
+                                            buffered_link_input_stream.close();
+                                            throw new IOException();
+                                        }
+                                        final var title = getLinkTitle(lines);
+                                        if (title.equals("")) throw new IOException();
+                                        crawled_pages.put(link.get(), title);
+                                        tasks.put(new Task(link.get()));
+                                        if (waiting) waiting = false;
+                                        buffered_link_input_stream.close();
+                                        parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                    }
+                                }
+                            }
+                            catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException add_www) {
+                                try {
+                                    if (link.get().substring(0, link.get().indexOf("://")).equals("http")) link.set("https" + link.get().substring(4));
+                                    else link.set("http" + link.get().substring(5));
+                                    if (link.get().contains("://www.")) throw new IOException();
+                                    link.set(link.get().substring(0, link.get().indexOf("://") + 3) + "www." + link.get().substring(link.get().indexOf("://") + 3));
+                                    connection.set(new URI(link.get()).toURL().openConnection());
+                                    connection.get().setConnectTimeout(1000);
+                                    connection.get().setReadTimeout(2000);
+                                    final var content = new AtomicReference<>(connection.get().getContentType());
+                                    if (content.get().contains("text/html")) {
+                                        charset_matcher.set(charset_pattern.matcher(content.get()));
+                                        if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                        else charset.set(StandardCharsets.UTF_8);
+                                        if (!kill_all && !crawled_pages.containsKey(link.get())) {
+                                            final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
+                                            final var lines = buffered_link_input_stream.lines().toArray();
+                                            final var count = lines.length;
+                                            if (count == 0) {
+                                                buffered_link_input_stream.close();
+                                                throw new IOException();
+                                            }
+                                            final var title = getLinkTitle(lines);
+                                            if (title.equals("")) throw new IOException();
+                                            crawled_pages.put(link.get(), title);
+                                            tasks.put(new Task(link.get()));
+                                            if (waiting) waiting = false;
+                                            buffered_link_input_stream.close();
+                                            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                        }
+                                    }
+                                }
+                                catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException change_protocol_add_www) {
+                                    try {
+                                        if (link.get().substring(0, link.get().indexOf("://")).equals("http")) link.set("https" + link.get().substring(4));
+                                        else link.set("http" + link.get().substring(5));
+                                        connection.set(new URI(link.get()).toURL().openConnection());
+                                        connection.get().setConnectTimeout(1000);
+                                        connection.get().setReadTimeout(2000);
+                                        final var content = new AtomicReference<>(connection.get().getContentType());
+                                        if (content.get().contains("text/html")) {
+                                            charset_matcher.set(charset_pattern.matcher(content.get()));
+                                            if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
+                                            else charset.set(StandardCharsets.UTF_8);
+                                            if (!kill_all && !crawled_pages.containsKey(link.get())) {
+                                                final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
+                                                final var lines = buffered_link_input_stream.lines().toArray();
+                                                final var count = lines.length;
+                                                if (count == 0) {
+                                                    buffered_link_input_stream.close();
+                                                    throw new IOException();
+                                                }
+                                                final var title = getLinkTitle(lines);
+                                                if (title.equals("")) crawled_pages.put(original_link, title);
+                                                else crawled_pages.put(link.get(), title);
+                                                tasks.put(new Task(link.get()));
+                                                if (waiting) waiting = false;
+                                                buffered_link_input_stream.close();
+                                                parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                            }
+                                        }
+                                    }
+                                    catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException ignored) {}
+                                }
+                            }
+                            catch (IndexOutOfBoundsException ignored) {}
+                        }
+
+                    }
+                    i.getAndIncrement();
+                }
+            }
+            catch (IOException | URISyntaxException e) {
+                e.printStackTrace();
+            }
+            catch (InterruptedException ignored) {}
+            System.out.println(Thread.currentThread().getName() + " finished => " + url);
         }
     }
 }
