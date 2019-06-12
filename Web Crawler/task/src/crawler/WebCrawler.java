@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
-class WebCrawler {
+public class WebCrawler extends JFrame {
 
     private final Pattern title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
     private final Pattern charset_pattern = Pattern.compile("(?Ui)^.*?charset=([\\w-]+).*$");
@@ -25,18 +25,18 @@ class WebCrawler {
     private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
     private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
     private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
+    private volatile AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
     private volatile boolean kill_all = false;
     private volatile boolean waiting = true;
     private volatile JLabel parsed_pages_updater = new JLabel("0");
     private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
     private volatile ArrayBlockingQueue<Runnable> tasks = new ArrayBlockingQueue<>(10000);
 
-    WebCrawler() {
-        final var frame = new JFrame();
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setLayout(new BorderLayout());
-        frame.setTitle("Web Crawler");
-        frame.setVisible(true);
+    public WebCrawler() {
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+        setTitle("Web Crawler");
+        setVisible(true);
 
         final var url_label = new JLabel("Start URL: ");
         final var url_text = new JTextField();
@@ -187,16 +187,16 @@ class WebCrawler {
                                 .addComponent(export_pane)
                         )
         );
-        frame.setContentPane(input_pane);
-        frame.setSize(500, 250);
+        setContentPane(input_pane);
+        setSize(500, 250);
 
-        run(run_button, url_text, workers_text, depth_text, depth_toggle, time_limit_text,
-                time_limit_toggle, elapsed_time_updater);
+        run(run_button, url_text, workers_text, depth_text, depth_toggle,
+                time_limit_text, time_limit_toggle, elapsed_time_updater);
         save(export_text, save_button);
     }
 
-    private void run(JToggleButton run_button, JTextField url_text, JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text,
-                     JCheckBox time_limit_toggle, JLabel elapsed_time_updater) {
+    private void run(JToggleButton run_button, JTextField url_text, JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle,
+                     JTextField time_limit_text, JCheckBox time_limit_toggle, JLabel elapsed_time_updater) {
         HttpsURLConnection.setDefaultHostnameVerifier((hostname, sslSession) -> hostname.equals("localhost"));
         final var timer_worker = Executors.newSingleThreadExecutor();
         final var parser_worker = Executors.newSingleThreadExecutor();
@@ -204,7 +204,6 @@ class WebCrawler {
         final var time = new AtomicLong(1000L);
         final var timer = new AtomicReference<Timer>();
         final var max_depth = new AtomicInteger(1);
-        final var workers = new AtomicReference<ThreadPoolExecutor>();
         final var worker_count = new AtomicInteger(0);
         run_button.addItemListener(e -> {
             if (run_button.getText().equals("Run") && run_button.isSelected()) {
@@ -252,7 +251,6 @@ class WebCrawler {
                             }
                             if (!tasks.isEmpty()) workers.get().submit(tasks.remove());
                         }
-                        System.out.println(Thread.activeCount() + " active threads");
                         if (time_limit_toggle.isSelected()) timer.get().stop();
                         run_button.setText("Run");
                         return null;
@@ -265,7 +263,9 @@ class WebCrawler {
             }
             else if (run_button.getText().equals("Stop") && run_button.isSelected()) {
                 kill_all = true;
-                workers.get().getQueue().clear();
+                if (workers.get() != null) {
+                    if (workers.get().getQueue() != null) workers.get().getQueue().clear();
+                }
                 tasks.clear();
                 if (timer.get() != null && time_limit_toggle.isSelected()) timer.get().stop();
                 run_button.setText("Run");
@@ -277,26 +277,18 @@ class WebCrawler {
     private void save(JTextField export_text, JButton export_button) {
         export_button.addActionListener(e -> {
             export_button.setSelected(false);
-            final var save_worker = new SwingWorker<String, Object>() {
-
-                @Override
-                public String doInBackground() {
-                    try {
-                        final var output = new OutputStreamWriter(new FileOutputStream(export_text.getText()), StandardCharsets.UTF_8);
-                        for (var entry : crawled_pages.entrySet()) {
-                            output.write(entry.getKey() + "\n");
-                            output.write(entry.getValue() + "\n");
-                        }
-                        output.close();
-                    }
-                    catch (IOException error) {
-                        // TODO add error popup window
-                        error.printStackTrace();
-                    }
-                    return null;
+            try {
+                final var output = new OutputStreamWriter(new FileOutputStream(export_text.getText()), StandardCharsets.UTF_8);
+                for (var entry : crawled_pages.entrySet()) {
+                    output.write(entry.getKey() + "\n");
+                    output.write(entry.getValue() + "\n");
                 }
-            };
-            save_worker.execute();
+                output.close();
+            }
+            catch (IOException error) {
+                // TODO add error popup window
+                error.printStackTrace();
+            }
         });
     }
 
@@ -527,7 +519,11 @@ class WebCrawler {
             catch (IOException | URISyntaxException e) {
                 e.printStackTrace();
             }
-            catch (InterruptedException ignored) {}
+            catch (InterruptedException ignored) {
+                kill_all = true;
+                if (workers.get() != null) workers.get().getQueue().clear();
+                tasks.clear();
+            }
             System.out.println(Thread.currentThread().getName() + " finished => " + url);
         }
     }
