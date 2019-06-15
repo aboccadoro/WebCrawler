@@ -1,12 +1,9 @@
 package crawler;
 
-import javax.net.ssl.HttpsURLConnection;
 import javax.swing.*;
 import javax.swing.Timer;
 import java.awt.*;
 import java.io.*;
-import java.net.*;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -15,22 +12,23 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
+import org.jsoup.HttpStatusException;
+import org.jsoup.Jsoup;
 
 public class WebCrawler extends JFrame {
 
-    private final Pattern title_pattern = Pattern.compile("(?Uis).*?<title[^>]*>(.*?)(?:</title>.*?)?");
-    private final Pattern charset_pattern = Pattern.compile("(?Ui)^.*?charset=([\\w-]+).*$");
-    private final Pattern href_pattern = Pattern.compile("(?Ui).*?<a\\s(?:[^>]+//s)?href=([\"'])([^\"']+)\\1[^>]*>(?:.+?</a>)?.*?");
+    private final Pattern href_pattern = Pattern.compile("(?Uis).*href=(['\"])(.*?)\\1.*");
     private final Pattern relative_pattern = Pattern.compile("(?Ui)^([^/]+)");
     private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
     private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
     private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
-    private volatile AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
-    private volatile boolean kill_all = false;
+    private final JLabel parsed_pages_updater = new JLabel("0");
+    private int max_depth = 0;
     private volatile boolean waiting = true;
-    private volatile JLabel parsed_pages_updater = new JLabel("0");
+    private volatile boolean kill_all = false;
     private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
-    private volatile ArrayBlockingQueue<Runnable> tasks = new ArrayBlockingQueue<>(10000);
+    private volatile AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
+    private volatile ArrayBlockingQueue<Runnable> tasks = new ArrayBlockingQueue<>(100000);
 
     public WebCrawler() {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -197,13 +195,11 @@ public class WebCrawler extends JFrame {
 
     private void run(JToggleButton run_button, JTextField url_text, JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle,
                      JTextField time_limit_text, JCheckBox time_limit_toggle, JLabel elapsed_time_updater) {
-        HttpsURLConnection.setDefaultHostnameVerifier((hostname, sslSession) -> hostname.equals("localhost"));
         final var timer_worker = Executors.newSingleThreadExecutor();
         final var parser_worker = Executors.newSingleThreadExecutor();
         final var formatter = new SimpleDateFormat("m:ss");
         final var time = new AtomicLong(1000L);
         final var timer = new AtomicReference<Timer>();
-        final var max_depth = new AtomicInteger(1);
         final var worker_count = new AtomicInteger(0);
         run_button.addItemListener(e -> {
             if (run_button.getText().equals("Run") && run_button.isSelected()) {
@@ -231,7 +227,7 @@ public class WebCrawler extends JFrame {
                         return null;
                     });
                 }
-                if (depth_toggle.isSelected()) max_depth.set(Integer.parseInt(depth_text.getText()));
+                if (depth_toggle.isSelected()) max_depth = Integer.parseInt(depth_text.getText());
                 try {
                     parser_worker.submit(() -> {
                         worker_count.set(Integer.parseInt(workers_text.getText()));
@@ -240,9 +236,9 @@ public class WebCrawler extends JFrame {
                             if (worker_count.get() > workers.get().getMaximumPoolSize()) workers.get().setMaximumPoolSize(worker_count.get());
                             workers.get().setCorePoolSize(worker_count.get());
                         }
-                        workers.get().submit(new Task(url_text.getText()));
                         waiting = true;
-                        if (!tasks.isEmpty()) tasks.clear();
+                        if (depth_toggle.isSelected()) workers.get().submit(new Task(url_text.getText(), 0, true));
+                        else workers.get().submit(new Task(url_text.getText(), 0, false));
                         while (!tasks.isEmpty() || workers.get().getActiveCount() != 0 || waiting) {
                             if (kill_all) {
                                 workers.get().getQueue().clear();
@@ -257,6 +253,14 @@ public class WebCrawler extends JFrame {
                     });
                 }
                 catch (Exception error) {
+                    kill_all = true;
+                    if (workers.get() != null) {
+                        if (workers.get().getQueue() != null) workers.get().getQueue().clear();
+                    }
+                    tasks.clear();
+                    if (time_limit_toggle.isSelected()) timer.get().stop();
+                    run_button.setText("Run");
+                    run_button.setSelected(false);
                     // TODO add error popup window
                     error.printStackTrace();
                 }
@@ -267,7 +271,7 @@ public class WebCrawler extends JFrame {
                     if (workers.get().getQueue() != null) workers.get().getQueue().clear();
                 }
                 tasks.clear();
-                if (timer.get() != null && time_limit_toggle.isSelected()) timer.get().stop();
+                if (time_limit_toggle.isSelected()) timer.get().stop();
                 run_button.setText("Run");
                 run_button.setSelected(false);
             }
@@ -292,239 +296,118 @@ public class WebCrawler extends JFrame {
         });
     }
 
-    private String getLinkTitle(Object[] lines) {
-        StringBuilder nextLine;
-        final var i = new AtomicInteger(0);
-        while (i.get() < lines.length) {
-            nextLine = new StringBuilder((String)lines[i.getAndIncrement()]);
-            final var title_matcher = new AtomicReference<>(title_pattern.matcher(nextLine));
-            if (title_matcher.get().matches()) {
-                while (!nextLine.toString().toLowerCase().contains("</title>")) {
-                    final var next = (String)lines[i.getAndIncrement()];
-                    nextLine.append(next);
-                }
-                title_matcher.set(title_pattern.matcher(nextLine));
-                if (title_matcher.get().matches()) return title_matcher.get().group(1);
-            }
-        }
-        return "";
-    }
-
-    private String validateLink(AtomicReference<String> link, String url, String protocol) {
-        final var relative_matcher = relative_pattern.matcher(link.get());
-        final var no_protocol_matcher = no_protocol_pattern.matcher(link.get());
-        final var nosource_slash_matcher = nosource_slash_pattern.matcher(link.get());
-        final var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link.get());
-        if (relative_matcher.matches() || (nosource_noslash_matcher.matches() && !link.get().contains("://"))) {
+    private String validateLink(String link, String url, String protocol) {
+        final var relative_matcher = relative_pattern.matcher(link);
+        final var no_protocol_matcher = no_protocol_pattern.matcher(link);
+        final var nosource_slash_matcher = nosource_slash_pattern.matcher(link);
+        final var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link);
+        final var valid = new AtomicReference<>(link);
+        if (relative_matcher.matches() || (nosource_noslash_matcher.matches() && !link.contains("://"))) {
             var index = url.lastIndexOf('/');
-            if (url.charAt(index - 1) != '/') link.set(url.substring(0, index + 1) + link.get());
-            else link.set(url + '/' + link.get());
+            if (url.charAt(index - 1) != '/') valid.set(url.substring(0, index + 1) + link);
+            else valid.set(url + '/' + link);
         }
-        else if (no_protocol_matcher.matches()) link.set(protocol + ':' + link.get());
+        else if (no_protocol_matcher.matches()) valid.set(protocol + ':' + link);
         else if (nosource_slash_matcher.matches()) {
             final var index = url.lastIndexOf('/');
-            if (url.charAt(index - 1) != '/') link.set(url.substring(0, index) + link.get());
-            else link.set(url + link.get());
+            if (url.charAt(index - 1) != '/') valid.set(url.substring(0, index) + link);
+            else valid.set(url + link);
         }
-        return link.get();
-    }
-
-    private Charset getCharSet(String match) {
-        switch (match.toLowerCase()) {
-            case "us-ascii":
-                return StandardCharsets.US_ASCII;
-            case "iso-8859-1":
-                return StandardCharsets.ISO_8859_1;
-            case "utf-16":
-                return StandardCharsets.UTF_16;
-            case "utf-16be":
-                return StandardCharsets.UTF_16BE;
-            case "utf-16le":
-                return StandardCharsets.UTF_16LE;
-        }
-        return StandardCharsets.UTF_8;
+        return valid.get();
     }
 
     class Task implements Runnable {
 
         private String url;
+        private int depth;
+        private boolean limit;
 
-        private Task(String url) {
+        private Task(String url, int depth, boolean limit) {
             this.url = url;
+            this.depth = depth;
+            this.limit = limit;
         }
 
         @Override
         public void run() {
+            final var protocol = url.substring(0, url.indexOf("://"));
             try {
-                System.out.println(Thread.currentThread().getName() + " started => " + url);
-                final var input = new URI(url).toURL();
-                final var protocol = new AtomicReference<>(input.getProtocol());
-                final var input_stream = input.openConnection();
-                input_stream.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0");
-                final var charset_matcher = new AtomicReference<>(charset_pattern.matcher(input_stream.getContentType()));
-                final var charset = new AtomicReference<>(StandardCharsets.UTF_8);
-                if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                final var buffered_input_stream = new BufferedReader(new InputStreamReader(input_stream.getInputStream(), charset.get()));
-                final var buffered_lines = buffered_input_stream.lines().toArray();
-
-                final var i = new AtomicInteger(0);
-                while (i.get() < buffered_lines.length) {
-                    final var html = new StringBuilder(buffered_lines[i.get()].toString());
-                    final var title_matcher = new AtomicReference<>(title_pattern.matcher(buffered_lines[i.get()].toString()));
-                    if (title_matcher.get().matches() && crawled_pages.isEmpty()) {
-                        while (!html.toString().contains("</title>")) {
-                            html.append(buffered_lines[i.getAndIncrement()].toString());
-                        }
-                        title_matcher.set(title_pattern.matcher(html.toString()));
-                        if (title_matcher.get().matches()) {
-                            crawled_pages.put(url, title_matcher.get().group(1));
-                            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                if (!crawled_pages.containsKey(url)) {
+                    final var doc = Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get();
+                    crawled_pages.put(url, doc.title());
+                    if (!limit) {
+                        final var links = doc.select("a[href]");
+                        synchronized (this) {
+                            for (var link : links) {
+                                if (kill_all) break;
+                                final var href_matcher = href_pattern.matcher(link.toString());
+                                if (href_matcher.matches()) {
+                                    tasks.put(new Task(validateLink(href_matcher.group(2), url, protocol), depth + 1, limit));
+                                    if (waiting) waiting = false;
+                                }
+                            }
                         }
                     }
-                    final var href_matcher = href_pattern.matcher(html);
-                    while (!kill_all && href_matcher.find()) {
-                        final var link = new AtomicReference<>(href_matcher.group(2));
-                        final var connection = new AtomicReference<URLConnection>();
-                        link.set(validateLink(link, url, protocol.get()));
-                        final var original_link = link.get();
-                        try {
-                            connection.set(new URI(link.get()).toURL().openConnection());
-                            connection.get().setConnectTimeout(1000);
-                            connection.get().setReadTimeout(2000);
-                            final var content = new AtomicReference<>(connection.get().getContentType());
-                            if (content.get().contains("text/html")) {
-                                charset_matcher.set(charset_pattern.matcher(content.get()));
-                                if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                else charset.set(StandardCharsets.UTF_8);
-                                if (!kill_all && !crawled_pages.containsKey(link.get())) {
-                                    final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
-                                    final var lines = buffered_link_input_stream.lines().toArray();
-                                    final var count = lines.length;
-                                    if (count == 0) {
-                                        buffered_link_input_stream.close();
-                                        throw new IOException();
-                                    }
-                                    final var title = getLinkTitle(lines);
-                                    if (title.equals("")) throw new IOException();
-                                    crawled_pages.put(link.get(), title);
-                                    tasks.put(new Task(link.get()));
+                    else if (depth + 1 <= max_depth) {
+                        final var links = doc.select("a[href]");
+                        synchronized (this) {
+                            for (var link : links) {
+                                if (kill_all) break;
+                                final var href_matcher = href_pattern.matcher(link.toString());
+                                if (href_matcher.matches()) {
+                                    tasks.put(new Task(validateLink(href_matcher.group(2), url, protocol), depth + 1, limit));
                                     if (waiting) waiting = false;
-                                    buffered_link_input_stream.close();
+                                }
+                            }
+                        }
+                    }
+                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                }
+            }
+            catch (IOException | InterruptedException e) {
+                if (e instanceof HttpStatusException) {
+                    final var status = ((HttpStatusException)e).getStatusCode();
+                    if (status == 403) {
+                        if (protocol.equals("http")) {
+                            url = "https" + url.substring(url.indexOf("://"));
+                            try {
+                                if (!crawled_pages.containsKey(url)) {
+                                    final var doc = Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get();
+                                    crawled_pages.put(url, doc.title());
+                                    if (!limit) {
+                                        final var links = doc.select("a[href]");
+                                        synchronized (this) {
+                                            for (var link : links) {
+                                                if (kill_all) break;
+                                                final var href_matcher = href_pattern.matcher(link.toString());
+                                                if (href_matcher.matches()) {
+                                                    tasks.put(new Task(validateLink(href_matcher.group(2), url, protocol), depth + 1, limit));
+                                                    if (waiting) waiting = false;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    else if (depth + 1 <= max_depth) {
+                                        final var links = doc.select("a[href]");
+                                        synchronized (this) {
+                                            for (var link : links) {
+                                                if (kill_all) break;
+                                                final var href_matcher = href_pattern.matcher(link.toString());
+                                                if (href_matcher.matches()) {
+                                                    tasks.put(new Task(validateLink(href_matcher.group(2), url, protocol), depth + 1, limit));
+                                                    if (waiting) waiting = false;
+                                                }
+                                            }
+                                        }
+                                    }
                                     parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
                                 }
                             }
+                            catch (IOException | InterruptedException ignored) {}
                         }
-                        catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException change_protocol) {
-                            try {
-                                if (link.get().substring(0, link.get().indexOf("://")).equals("http")) link.set("https" + link.get().substring(4));
-                                else link.set("http" + link.get().substring(5));
-                                connection.set(new URI(link.get()).toURL().openConnection());
-                                connection.get().setConnectTimeout(1000);
-                                connection.get().setReadTimeout(2000);
-                                final var content = new AtomicReference<>(connection.get().getContentType());
-                                if (content.get().contains("text/html")) {
-                                    charset_matcher.set(charset_pattern.matcher(content.get()));
-                                    if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                    else charset.set(StandardCharsets.UTF_8);
-                                    if (!kill_all && !crawled_pages.containsKey(link.get())) {
-                                        final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
-                                        final var lines = buffered_link_input_stream.lines().toArray();
-                                        final var count = lines.length;
-                                        if (count == 0) {
-                                            buffered_link_input_stream.close();
-                                            throw new IOException();
-                                        }
-                                        final var title = getLinkTitle(lines);
-                                        if (title.equals("")) throw new IOException();
-                                        crawled_pages.put(link.get(), title);
-                                        tasks.put(new Task(link.get()));
-                                        if (waiting) waiting = false;
-                                        buffered_link_input_stream.close();
-                                        parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                    }
-                                }
-                            }
-                            catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException add_www) {
-                                try {
-                                    if (link.get().substring(0, link.get().indexOf("://")).equals("http")) link.set("https" + link.get().substring(4));
-                                    else link.set("http" + link.get().substring(5));
-                                    if (link.get().contains("://www.")) throw new IOException();
-                                    link.set(link.get().substring(0, link.get().indexOf("://") + 3) + "www." + link.get().substring(link.get().indexOf("://") + 3));
-                                    connection.set(new URI(link.get()).toURL().openConnection());
-                                    connection.get().setConnectTimeout(1000);
-                                    connection.get().setReadTimeout(2000);
-                                    final var content = new AtomicReference<>(connection.get().getContentType());
-                                    if (content.get().contains("text/html")) {
-                                        charset_matcher.set(charset_pattern.matcher(content.get()));
-                                        if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                        else charset.set(StandardCharsets.UTF_8);
-                                        if (!kill_all && !crawled_pages.containsKey(link.get())) {
-                                            final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
-                                            final var lines = buffered_link_input_stream.lines().toArray();
-                                            final var count = lines.length;
-                                            if (count == 0) {
-                                                buffered_link_input_stream.close();
-                                                throw new IOException();
-                                            }
-                                            final var title = getLinkTitle(lines);
-                                            if (title.equals("")) throw new IOException();
-                                            crawled_pages.put(link.get(), title);
-                                            tasks.put(new Task(link.get()));
-                                            if (waiting) waiting = false;
-                                            buffered_link_input_stream.close();
-                                            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                        }
-                                    }
-                                }
-                                catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException change_protocol_add_www) {
-                                    try {
-                                        if (link.get().substring(0, link.get().indexOf("://")).equals("http")) link.set("https" + link.get().substring(4));
-                                        else link.set("http" + link.get().substring(5));
-                                        connection.set(new URI(link.get()).toURL().openConnection());
-                                        connection.get().setConnectTimeout(1000);
-                                        connection.get().setReadTimeout(2000);
-                                        final var content = new AtomicReference<>(connection.get().getContentType());
-                                        if (content.get().contains("text/html")) {
-                                            charset_matcher.set(charset_pattern.matcher(content.get()));
-                                            if (charset_matcher.get().matches()) charset.set(getCharSet(charset_matcher.get().group(1)));
-                                            else charset.set(StandardCharsets.UTF_8);
-                                            if (!kill_all && !crawled_pages.containsKey(link.get())) {
-                                                final var buffered_link_input_stream = new BufferedReader(new InputStreamReader(connection.get().getInputStream(), charset.get()));
-                                                final var lines = buffered_link_input_stream.lines().toArray();
-                                                final var count = lines.length;
-                                                if (count == 0) {
-                                                    buffered_link_input_stream.close();
-                                                    throw new IOException();
-                                                }
-                                                final var title = getLinkTitle(lines);
-                                                if (title.equals("")) crawled_pages.put(original_link, title);
-                                                else crawled_pages.put(link.get(), title);
-                                                tasks.put(new Task(link.get()));
-                                                if (waiting) waiting = false;
-                                                buffered_link_input_stream.close();
-                                                parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                            }
-                                        }
-                                    }
-                                    catch (IOException | IllegalArgumentException | URISyntaxException | NullPointerException ignored) {}
-                                }
-                            }
-                            catch (IndexOutOfBoundsException ignored) {}
-                        }
-
                     }
-                    i.getAndIncrement();
                 }
             }
-            catch (IOException | URISyntaxException e) {
-                e.printStackTrace();
-            }
-            catch (InterruptedException ignored) {
-                kill_all = true;
-                if (workers.get() != null) workers.get().getQueue().clear();
-                tasks.clear();
-            }
-            System.out.println(Thread.currentThread().getName() + " finished => " + url);
         }
     }
 }
