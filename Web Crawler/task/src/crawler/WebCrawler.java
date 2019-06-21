@@ -8,12 +8,14 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
 
 public class WebCrawler extends JFrame {
 
@@ -22,17 +24,18 @@ public class WebCrawler extends JFrame {
     private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
     private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
     private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
+    private final JTextField url_text = new JTextField();
     private final JLabel parsed_pages_updater = new JLabel("0");
-    private volatile boolean waiting = true;
-    private volatile boolean kill_all = false;
-    private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
-    private volatile AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
-    private final AtomicInteger worker_count = new AtomicInteger(0);
-    private final AtomicReference<Timer> timer = new AtomicReference<>();
     private final JToggleButton run_button = new JToggleButton("Run");
     private final JCheckBox time_limit_toggle = new JCheckBox("Enabled");
     private int max_depth = 0;
-
+    private volatile boolean waiting = true;
+    private volatile boolean kill_all = false;
+    private final ArrayList<String> visited = new ArrayList<>();
+    private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
+    private final AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
+    private final AtomicInteger worker_count = new AtomicInteger(0);
+    private final AtomicReference<Timer> timer = new AtomicReference<>();
 
     public WebCrawler() {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -41,9 +44,7 @@ public class WebCrawler extends JFrame {
         setVisible(true);
 
         final var url_label = new JLabel("Start URL: ");
-        final var url_text = new JTextField();
         url_text.setName("UrlTextField");
-        final var run_button = new JToggleButton("Run");
         run_button.setName("RunButton");
         final var workers_label = new JLabel("Workers: ");
         final var workers_text = new JTextField();
@@ -191,11 +192,11 @@ public class WebCrawler extends JFrame {
         setContentPane(input_pane);
         setSize(500, 250);
 
-        run(url_text, workers_text, depth_text, depth_toggle, time_limit_text, elapsed_time_updater);
+        run(workers_text, depth_text, depth_toggle, time_limit_text, elapsed_time_updater);
         save(export_text, save_button);
     }
 
-    private void run(JTextField url_text, JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text, JLabel elapsed_time_updater) {
+    private void run(JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text, JLabel elapsed_time_updater) {
         final var formatter = new SimpleDateFormat("m:ss");
         final var time = new AtomicLong(1000L);
         run_button.addItemListener(e -> {
@@ -204,28 +205,30 @@ public class WebCrawler extends JFrame {
                 run_button.setSelected(false);
                 elapsed_time_updater.setText("0:00");
                 parsed_pages_updater.setText("0");
-                if (depth_toggle.isSelected()) max_depth = Integer.parseInt(depth_text.getText());
                 try {
-                    worker_count.set(Integer.parseInt(workers_text.getText()));
-                    if (workers.get() == null) workers.set((ThreadPoolExecutor) Executors.newFixedThreadPool(worker_count.get()));
+                    if (workers_text.getText().equals("")) worker_count.set(1);
+                    else worker_count.set(Integer.parseInt(workers_text.getText()));
+                    if (workers.get() == null) workers.set((ThreadPoolExecutor)Executors.newFixedThreadPool(worker_count.get()));
                     else if (workers.get().getCorePoolSize() != worker_count.get()) {
                         if (worker_count.get() > workers.get().getMaximumPoolSize()) workers.get().setMaximumPoolSize(worker_count.get());
                         workers.get().setCorePoolSize(worker_count.get());
                     }
+                    if (depth_toggle.isSelected()) max_depth = Integer.parseInt(depth_text.getText());
+                    else max_depth = Integer.parseInt(depth_text.getText());
                     kill_all = false;
                     waiting = true;
                     crawled_pages.clear();
-                    if (depth_toggle.isSelected()) workers.get().submit(new Task(url_text.getText(), 0));
-                    else workers.get().submit(new Task(url_text.getText()));
+                    workers.get().submit(new Task(url_text.getText(), 0));
+//                    else workers.get().submit(new Task(url_text.getText()));
                     if (time_limit_toggle.isSelected()) {
                         time.set(1000L);
                         if (timer.get() == null) {
                             timer.set(new Timer(1000, evt -> {
-                                if (time.get() >= Long.parseLong(time_limit_text.getText()) * 1000L && !waiting) {
+                                if (time.get() >= Long.parseLong(time_limit_text.getText()) * 1000L || workers.get().getActiveCount() == 0) {
                                     kill_all = true;
                                     run_button.setText("Run");
                                     run_button.setSelected(false);
-                                    ((Timer) evt.getSource()).stop();
+                                    ((Timer)evt.getSource()).stop();
                                 }
                                 elapsed_time_updater.setText(formatter.format(time.get()));
                                 time.set(time.get() + 1000L);
@@ -236,7 +239,8 @@ public class WebCrawler extends JFrame {
                 }
                 catch (IllegalArgumentException | RejectedExecutionException error) {
                     kill_all = true;
-                    if (time_limit_toggle.isSelected()) timer.get().stop();
+                    if (time_limit_toggle.isSelected() && timer.get() != null) timer.get().stop();
+                    visited.clear();
                     run_button.setText("Run");
                     run_button.setSelected(false);
                 }
@@ -302,117 +306,105 @@ public class WebCrawler extends JFrame {
 
         @Override
         public void run() {
-            System.out.println("started");
             if (!kill_all) {
                 final var protocol = url.substring(0, url.indexOf("://"));
+                final var redundant = new AtomicBoolean(false);
+                final var doc = new AtomicReference<Document>();
                 try {
-                    final var doc = Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get();
-                    if (!kill_all) {
-                        crawled_pages.put(url, doc.title());
-                        parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                    }
-                    if (!crawled_pages.containsKey(url) && !kill_all) {
-                        if (depth == null) {
-                            final var links = doc.select("a[href]");
-                            if (links.isEmpty() && crawled_pages.size() == 1) {
-                                kill_all = true;
-                                waiting = false;
-                                if (time_limit_toggle.isSelected()) timer.get().stop();
-                                run_button.setText("Run");
-                                run_button.setSelected(false);
+                    synchronized (this) {
+                        if (!kill_all) {
+                            doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
+                            if (visited.contains(url)) {
+                                if (crawled_pages.containsKey(url)) redundant.set(true);
+                                else {
+                                    crawled_pages.put(url, doc.get().title());
+                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+//                                    System.out.println(depth + " " + url);
+                                }
                             }
-                            for (var link : links) {
-                                final var href_matcher = href_pattern.matcher(link.toString());
-                                if (href_matcher.matches()) {
-                                    if (kill_all) break;
-                                    if (!crawled_pages.containsKey(href_matcher.group(2))) {
-                                        final var valid = validateLink(href_matcher.group(2), url, protocol);
-                                        workers.get().submit(new Task(valid));
-                                        System.out.println(valid);
-                                    }
-                                    if (waiting) waiting = false;
+                            else {
+                                visited.add(url);
+                                if (!url.equals(url_text.getText())) {
+                                    crawled_pages.put(url, doc.get().title());
+                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+//                                    System.out.println(depth + " " + url);
                                 }
                             }
                         }
-                        else if (depth + 1 <= max_depth) {
-                            final var links = doc.select("a[href]");
-                            if (links.isEmpty() && crawled_pages.size() == 1) {
-                                kill_all = true;
-                                waiting = false;
-                                if (time_limit_toggle.isSelected()) timer.get().stop();
-                                run_button.setText("Run");
-                                run_button.setSelected(false);
-                            }
-                            for (var link : links) {
-                                final var href_matcher = href_pattern.matcher(link.toString());
-                                if (href_matcher.matches()) {
-                                    if (kill_all) break;
-                                    if (!crawled_pages.containsKey(href_matcher.group(2))) {
-                                        final var valid = validateLink(href_matcher.group(2), url, protocol);
-                                        workers.get().submit(new Task(valid, depth + 1));
-                                        System.out.println(valid);
+                        else redundant.set(true);
+                    }
+                    if (!redundant.get()) {
+                        final var links = doc.get().select("a[href]");
+                        for (var link : links) {
+                            final var href_matcher = href_pattern.matcher(link.toString());
+                            if (href_matcher.matches()) {
+                                if (kill_all) break;
+                                final var valid = validateLink(href_matcher.group(2), url, protocol);
+                                if (depth == null) workers.get().submit(new Task(valid));
+                                else if (depth + 1 == max_depth) {
+                                    try {
+                                        synchronized (this) {
+                                            if (!crawled_pages.containsKey(valid)) {
+                                                doc.set(Jsoup.connect(valid).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
+                                                crawled_pages.put(valid, doc.get().title());
+                                                parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+//                                                System.out.println(depth + 1 + " " + valid);
+                                            }
+                                        }
                                     }
-                                    if (waiting) waiting = false;
+                                    catch (IOException ignored) {}
                                 }
+                                else workers.get().submit(new Task(valid, depth + 1));
+                                if (waiting) waiting = false;
                             }
                         }
                     }
                 }
                 catch (IOException e) {
                     if (e instanceof HttpStatusException) {
-                        final var status = ((HttpStatusException) e).getStatusCode();
+                        final var status = ((HttpStatusException)e).getStatusCode();
                         if (status == 403) {
                             if (protocol.equals("http")) {
                                 url = "https" + url.substring(url.indexOf("://"));
                                 try {
-                                    final var doc = Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get();
-                                    if (!kill_all) {
-                                        crawled_pages.put(url, doc.title());
-                                        parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                    }
-                                    if (!crawled_pages.containsKey(url) && !kill_all) {
-                                        if (depth == null) {
-                                            final var links = doc.select("a[href]");
-                                            if (links.isEmpty() && crawled_pages.size() == 1) {
-                                                kill_all = true;
-                                                waiting = false;
-                                                if (time_limit_toggle.isSelected()) timer.get().stop();
-                                                run_button.setText("Run");
-                                                run_button.setSelected(false);
-                                            }
-                                            for (var link : links) {
-                                                final var href_matcher = href_pattern.matcher(link.toString());
-                                                if (href_matcher.matches()) {
-                                                    if (kill_all) break;
-                                                    if (!crawled_pages.containsKey(href_matcher.group(2))) {
-                                                        final var valid = validateLink(href_matcher.group(2), url, protocol);
-                                                        workers.get().submit(new Task(valid));
-                                                        System.out.println(valid);
-                                                    }
-                                                    if (waiting) waiting = false;
+                                    synchronized (this) {
+                                        if (!kill_all) {
+                                            doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
+                                            if (visited.contains(url)) redundant.set(true);
+                                            else {
+                                                visited.add(url);
+                                                if (!url.equals(url_text.getText())) {
+                                                    crawled_pages.put(url, doc.get().title());
+                                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+//                                                    System.out.println(depth + " " + url);
                                                 }
                                             }
                                         }
-                                        else if (depth + 1 <= max_depth) {
-                                            final var links = doc.select("a[href]");
-                                            if (links.isEmpty() && crawled_pages.size() == 1) {
-                                                kill_all = true;
-                                                waiting = false;
-                                                if (time_limit_toggle.isSelected()) timer.get().stop();
-                                                run_button.setText("Run");
-                                                run_button.setSelected(false);
-                                            }
-                                            for (var link : links) {
-                                                final var href_matcher = href_pattern.matcher(link.toString());
-                                                if (href_matcher.matches()) {
-                                                    if (kill_all) break;
-                                                    if (!crawled_pages.containsKey(href_matcher.group(2))) {
-                                                        final var valid = validateLink(href_matcher.group(2), url, protocol);
-                                                        workers.get().submit(new Task(valid, depth + 1));
-                                                        System.out.println(valid);
+                                        else redundant.set(true);
+                                    }
+                                    if (!redundant.get()) {
+                                        final var links = doc.get().select("a[href]");
+                                        for (var link : links) {
+                                            final var href_matcher = href_pattern.matcher(link.toString());
+                                            if (href_matcher.matches()) {
+                                                if (kill_all) break;
+                                                final var valid = validateLink(href_matcher.group(2), url, protocol);
+                                                if (depth == null) workers.get().submit(new Task(valid));
+                                                else if (depth + 1 == max_depth) {
+                                                    try {
+                                                        synchronized (this) {
+                                                            if (!crawled_pages.containsKey(valid)) {
+                                                                doc.set(Jsoup.connect(valid).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
+                                                                crawled_pages.put(valid, doc.get().title());
+                                                                parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+//                                                                System.out.println(depth + 1 + " " + valid);
+                                                            }
+                                                        }
                                                     }
-                                                    if (waiting) waiting = false;
+                                                    catch (IOException ignored) {}
                                                 }
+                                                else workers.get().submit(new Task(valid, depth + 1));
+                                                if (waiting) waiting = false;
                                             }
                                         }
                                     }
@@ -422,8 +414,14 @@ public class WebCrawler extends JFrame {
                         }
                     }
                 }
+                synchronized (this) {
+                    if (workers.get().getActiveCount() == 1 && workers.get().getQueue().size() == 0) {
+                        visited.clear();
+                        run_button.setText("Run");
+                        run_button.setSelected(false);
+                    }
+                }
             }
-            System.out.println("stopped");
         }
     }
 }
