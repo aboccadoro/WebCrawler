@@ -367,17 +367,23 @@ class WebCrawler extends JFrame {
 
         @Override
         public void run() {
+            // Periodically make checks to see if the thread should be killed
             if (!kill_all) {
                 final var protocol = url.substring(0, url.indexOf("://"));
                 final var redundant = new AtomicBoolean(false);
                 final var doc = new AtomicReference<Document>();
                 try {
+                    // Acquire the lock and attempt to establish a connection to the url
                     synchronized (this) {
                         if (!kill_all) {
-                            doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
+                            // If successful, mark it as visited and add it to the list of crawled pages,
+                            // otherwise it's already been visited
                             if (visited.contains(url)) {
+                                // If the start url is found within the crawl, and hasn't already been,
+                                // added to crawled_pages, add it
                                 if (crawled_pages.containsKey(url)) redundant.set(true);
                                 else {
+                                    doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
                                     crawled_pages.put(url, doc.get().title());
                                     parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
                                 }
@@ -385,6 +391,7 @@ class WebCrawler extends JFrame {
                             else {
                                 visited.add(url);
                                 if (!url.equals(url_text.getText())) {
+                                    doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
                                     crawled_pages.put(url, doc.get().title());
                                     parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
                                 }
@@ -392,16 +399,25 @@ class WebCrawler extends JFrame {
                         }
                         else redundant.set(true);
                     }
+                    // Check for redundancy based on whether the url has already been seen,
+                    // or the thread is set to die
                     if (!redundant.get()) {
+                        // Obtain all the href attributes in <a> tags found from the url's html
                         final var links = doc.get().select("a[href]");
                         for (var link : links) {
+                            // Obtain the actual href value from the link's html <a> tag
                             final var href_matcher = href_pattern.matcher(link.toString());
                             if (href_matcher.matches()) {
                                 if (kill_all) break;
+                                // Validate the matched href value and store it
                                 final var valid = validateLink(href_matcher.group(2), url, protocol);
+                                // Create the appropriate worker task for this valid link based on window input
                                 if (depth == null) workers.get().submit(new Task(valid));
                                 else if (depth + 1 == max_depth) {
                                     try {
+                                        // Again acquire the lock to attempt establishing a connection. We do this as
+                                        // the depth of this valid link is the maximum crawl depth, and we no longer
+                                        // wish to crawl this link for its links
                                         synchronized (this) {
                                             if (!crawled_pages.containsKey(valid)) {
                                                 doc.set(Jsoup.connect(valid).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
@@ -410,6 +426,7 @@ class WebCrawler extends JFrame {
                                             }
                                         }
                                     }
+                                    // Ignore validated links that fail
                                     catch (IOException ignored) {}
                                 }
                                 else workers.get().submit(new Task(valid, depth + 1));
@@ -419,19 +436,34 @@ class WebCrawler extends JFrame {
                     }
                 }
                 catch (IOException e) {
+                    // Check to see if the exception was protocol related
                     if (e instanceof HttpStatusException) {
+                        // Get the HTTP response code from the url
                         final var status = ((HttpStatusException)e).getStatusCode();
+                        // If status 403 not found check to see if we can secure the http connection
                         if (status == 403) {
                             if (protocol.equals("http")) {
                                 url = "https" + url.substring(url.indexOf("://"));
                                 try {
+                                    // Acquire the lock and attempt to establish a secure connection to the url
                                     synchronized (this) {
                                         if (!kill_all) {
-                                            doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
-                                            if (visited.contains(url)) redundant.set(true);
+                                            // If successful, mark it as visited and add it to the list of crawled pages,
+                                            // otherwise it's already been visited
+                                            if (visited.contains(url)) {
+                                                // If the start url is found within the crawl, and hasn't already been,
+                                                // added to crawled_pages, add it
+                                                if (crawled_pages.containsKey(url)) redundant.set(true);
+                                                else {
+                                                    doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
+                                                    crawled_pages.put(url, doc.get().title());
+                                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+                                                }
+                                            }
                                             else {
                                                 visited.add(url);
                                                 if (!url.equals(url_text.getText())) {
+                                                    doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
                                                     crawled_pages.put(url, doc.get().title());
                                                     parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
                                                 }
@@ -439,16 +471,25 @@ class WebCrawler extends JFrame {
                                         }
                                         else redundant.set(true);
                                     }
+                                    // Check for redundancy based on whether the url has already been seen,
+                                    // or the thread is set to die
                                     if (!redundant.get()) {
+                                        // Obtain all the href attributes in <a> tags found from the url's html
                                         final var links = doc.get().select("a[href]");
                                         for (var link : links) {
+                                            // Obtain the actual href value from the link's html <a> tag
                                             final var href_matcher = href_pattern.matcher(link.toString());
                                             if (href_matcher.matches()) {
                                                 if (kill_all) break;
+                                                // Validate the matched href value and store it
                                                 final var valid = validateLink(href_matcher.group(2), url, protocol);
+                                                // Create the appropriate worker task for this valid link based on window input
                                                 if (depth == null) workers.get().submit(new Task(valid));
                                                 else if (depth + 1 == max_depth) {
                                                     try {
+                                                        // Again acquire the lock to attempt establishing a connection. We do this as
+                                                        // the depth of this valid link is the maximum crawl depth, and we no longer
+                                                        // wish to crawl this link for its links
                                                         synchronized (this) {
                                                             if (!crawled_pages.containsKey(valid)) {
                                                                 doc.set(Jsoup.connect(valid).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
@@ -457,6 +498,7 @@ class WebCrawler extends JFrame {
                                                             }
                                                         }
                                                     }
+                                                    // Ignore validated links that fail
                                                     catch (IOException ignored) {}
                                                 }
                                                 else workers.get().submit(new Task(valid, depth + 1));
@@ -465,6 +507,7 @@ class WebCrawler extends JFrame {
                                         }
                                     }
                                 }
+                                // Ignore secure urls that fail
                                 catch (IOException ignored) {}
                             }
                         }
