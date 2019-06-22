@@ -17,32 +17,48 @@ import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 
+/**
+ * Implementation of a web crawler based off the Hyperskill.org project
+ */
 class WebCrawler extends JFrame {
 
-    private final Pattern href_pattern = Pattern.compile("(?Uis).*href=(['\"])(.*?)\\1.*");
-    private final Pattern relative_pattern = Pattern.compile("(?Ui)^([^/]+)");
-    private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+");
-    private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*");
-    private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*");
+    // regex to extract href attributes from anchor tags
+    private final Pattern href_pattern = Pattern.compile("(?Uis).*href=(['\"])(.*?)\\1.*"); //  : <a href="https://example.com/page.html">example</a>
+    // regex matching relative links without '/'
+    private final Pattern relative_pattern = Pattern.compile("(?Ui)^([^/]+)"); //               : example.com, page.html
+    // regex matching links missing a protocol
+    private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+"); //               : //example.com/page.html
+    // regex matching relative links starting with '/'
+    private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*"); //        : /page.html
+    // regex matching relative links not starting with a '/'
+    private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*"); // : page.html
+
+    // Initialize swing variables accessed in Task
     private final JTextField url_text = new JTextField();
     private final JLabel parsed_pages_updater = new JLabel("0");
     private final JToggleButton run_button = new JToggleButton("Run");
     private final JCheckBox time_limit_toggle = new JCheckBox("Enabled");
+
+    // Initialize variables associated with performing the crawl
     private int max_depth = 0;
+    private final ArrayList<String> visited = new ArrayList<>();
+    private final AtomicReference<Timer> timer = new AtomicReference<>();
+    private final AtomicInteger worker_count = new AtomicInteger(0);
+    private final AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
+
+    // Initialize volatile variables for maintaining concurrency
     private volatile boolean waiting = true;
     private volatile boolean kill_all = false;
-    private final ArrayList<String> visited = new ArrayList<>();
     private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
-    private final AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
-    private final AtomicInteger worker_count = new AtomicInteger(0);
-    private final AtomicReference<Timer> timer = new AtomicReference<>();
 
     WebCrawler() {
+        // Initialize an empty JFrame window and set it to visible
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
         setTitle("Web Crawler");
         setVisible(true);
 
+        // Initialize Swing variables not used inside the Task class
         final var url_label = new JLabel("Start URL: ");
         url_text.setName("UrlTextField");
         run_button.setName("RunButton");
@@ -66,6 +82,11 @@ class WebCrawler extends JFrame {
         final var save_button = new JButton("Save");
         save_button.setName("ExportButton");
 
+        // Below is the configuration of the layout within the JFrame window. Using a
+        // GroupLayout manager, JComponents are added to JPanels when necessary and
+        // are aligned horizontally and vertically with JComponents that lie on the
+        // same axis. If JComponents are added to a JPanel, they are sub-aligned
+        // within that JPanel using a GroupLayout manager and the process above.
         final var url_pane = new JPanel();
         final var url_layout = new GroupLayout(url_pane);
         url_pane.setLayout(url_layout);
@@ -189,6 +210,7 @@ class WebCrawler extends JFrame {
                                 .addComponent(export_pane)
                         )
         );
+        // Set the content pane for this JFrame, packing the contents within the window size
         setContentPane(input_pane);
         setSize(500, 250);
 
@@ -196,6 +218,21 @@ class WebCrawler extends JFrame {
         save(export_text, save_button);
     }
 
+    /**
+     * Defines the action performed when the run_button is clicked. An item listener is
+     * added to this JToggleButton to allow for run/stop functionality. The system starts
+     * with the run_button unselected and with text set to "Run". After being clicked, the
+     * text changes to "Stop" and again is set to unselected. The reason to set the button's
+     * selected state to false is to ensure the differentiation when starting and stopping.
+     * By deselecting the button upon every action the button has a more aesthetic appeal
+     * in the UI and works in tandem with the button's text to control starting/stopping.
+     *
+     * @param workers_text amount of worker threads to use
+     * @param depth_text maximum depth
+     * @param depth_toggle toggles the use of depth_text
+     * @param time_limit_text time limit
+     * @param elapsed_time_updater updates the UI based on timer
+     */
     private void run(JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text, JLabel elapsed_time_updater) {
         final var formatter = new SimpleDateFormat("m:ss");
         final var time = new AtomicLong(1000L);
@@ -255,9 +292,15 @@ class WebCrawler extends JFrame {
         });
     }
 
+    /**
+     * Defines the action performed when the export_button is clicked. The button's
+     * state is selected to false upon every action for aesthetic appeal in the UI.
+     *
+     * @param export_text name of the file to create and export to
+     * @param export_button export button
+     */
     private void save(JTextField export_text, JButton export_button) {
         export_button.addActionListener(e -> {
-            export_button.setSelected(false);
             try {
                 final var output = new OutputStreamWriter(new FileOutputStream(export_text.getText()), StandardCharsets.UTF_8);
                 for (var entry : crawled_pages.entrySet()) {
@@ -265,13 +308,25 @@ class WebCrawler extends JFrame {
                     output.write(entry.getValue() + "\n");
                 }
                 output.close();
-            } catch (IOException error) {
+            }
+            catch (IOException error) {
                 // TODO add error popup window
                 error.printStackTrace();
             }
         });
     }
 
+    /**
+     * When links are acquired during the crawl, it is necessary to validate them
+     * before submitting them as Tasks. Validation ensures the steps to attempt a
+     * valid connection are made before attempting (and potentially failing) a
+     * connection to the webpage associated with that link.
+     *
+     * @param link link to validate
+     * @param url parent of link
+     * @param protocol protocol of url
+     * @return link either validated or not
+     */
     private String validateLink(String link, String url, String protocol) {
         final var relative_matcher = relative_pattern.matcher(link);
         final var no_protocol_matcher = no_protocol_pattern.matcher(link);
@@ -291,16 +346,21 @@ class WebCrawler extends JFrame {
         return valid.get();
     }
 
+    /**
+     * Represents a Task thread to be submitted as a worker to a threadpool.
+     */
     class Task implements Runnable {
 
-        private String url;
-        private final Integer depth;
+        private String url; // Url to connect to and acquire links from
+        private final Integer depth; // The current depth of this url
 
+        // Constructs a Task with the current depth
         private Task(String url, Integer depth) {
             this.url = url;
             this.depth = depth;
         }
 
+        // Constructs a Task without the current depth
         private Task(String url) {
             this(url, null);
         }
