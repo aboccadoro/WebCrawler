@@ -17,7 +17,7 @@ import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 
-public class WebCrawler extends JFrame {
+class WebCrawler extends JFrame {
 
     private final Pattern href_pattern = Pattern.compile("(?Uis).*href=(['\"])(.*?)\\1.*");
     private final Pattern relative_pattern = Pattern.compile("(?Ui)^([^/]+)");
@@ -37,7 +37,7 @@ public class WebCrawler extends JFrame {
     private final AtomicInteger worker_count = new AtomicInteger(0);
     private final AtomicReference<Timer> timer = new AtomicReference<>();
 
-    public WebCrawler() {
+    WebCrawler() {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
         setTitle("Web Crawler");
@@ -218,8 +218,8 @@ public class WebCrawler extends JFrame {
                     kill_all = false;
                     waiting = true;
                     crawled_pages.clear();
-                    workers.get().submit(new Task(url_text.getText(), 0));
-//                    else workers.get().submit(new Task(url_text.getText()));
+                    if (depth_toggle.isSelected()) workers.get().submit(new Task(url_text.getText(), 0));
+                    else workers.get().submit(new Task(url_text.getText()));
                     if (time_limit_toggle.isSelected()) {
                         time.set(1000L);
                         if (timer.get() == null) {
@@ -238,6 +238,7 @@ public class WebCrawler extends JFrame {
                     }
                 }
                 catch (IllegalArgumentException | RejectedExecutionException error) {
+                    // TODO add error popup window
                     kill_all = true;
                     if (time_limit_toggle.isSelected() && timer.get() != null) timer.get().stop();
                     visited.clear();
@@ -319,7 +320,6 @@ public class WebCrawler extends JFrame {
                                 else {
                                     crawled_pages.put(url, doc.get().title());
                                     parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-//                                    System.out.println(depth + " " + url);
                                 }
                             }
                             else {
@@ -327,7 +327,6 @@ public class WebCrawler extends JFrame {
                                 if (!url.equals(url_text.getText())) {
                                     crawled_pages.put(url, doc.get().title());
                                     parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-//                                    System.out.println(depth + " " + url);
                                 }
                             }
                         }
@@ -348,7 +347,6 @@ public class WebCrawler extends JFrame {
                                                 doc.set(Jsoup.connect(valid).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
                                                 crawled_pages.put(valid, doc.get().title());
                                                 parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-//                                                System.out.println(depth + 1 + " " + valid);
                                             }
                                         }
                                     }
@@ -376,7 +374,6 @@ public class WebCrawler extends JFrame {
                                                 if (!url.equals(url_text.getText())) {
                                                     crawled_pages.put(url, doc.get().title());
                                                     parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-//                                                    System.out.println(depth + " " + url);
                                                 }
                                             }
                                         }
@@ -397,7 +394,6 @@ public class WebCrawler extends JFrame {
                                                                 doc.set(Jsoup.connect(valid).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
                                                                 crawled_pages.put(valid, doc.get().title());
                                                                 parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-//                                                                System.out.println(depth + 1 + " " + valid);
                                                             }
                                                         }
                                                     }
