@@ -8,12 +8,10 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
-import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 
@@ -22,15 +20,15 @@ import org.jsoup.nodes.Document;
  */
 class WebCrawler extends JFrame {
 
-    // regex to extract href attributes from anchor tags
+    // Regex to extract href attributes from anchor tags
     private final Pattern href_pattern = Pattern.compile("(?Uis).*href=(['\"])(.*?)\\1.*"); //  : <a href="https://example.com/page.html">example</a>
-    // regex matching relative links without '/'
+    // Regex matching relative links without '/'
     private final Pattern relative_pattern = Pattern.compile("(?Ui)^([^/]+)"); //               : example.com, page.html
-    // regex matching links missing a protocol
+    // Regex matching links missing a protocol
     private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+"); //               : //example.com/page.html
-    // regex matching relative links starting with '/'
+    // Regex matching relative links starting with '/'
     private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*"); //        : /page.html
-    // regex matching relative links not starting with a '/'
+    // Regex matching relative links not starting with a '/'
     private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*"); // : page.html
 
     // Initialize swing variables accessed in Task
@@ -41,16 +39,15 @@ class WebCrawler extends JFrame {
 
     // Initialize variables associated with performing the crawl
     private int max_depth = 0;
-    private final ArrayList<String> visited = new ArrayList<>();
     private final AtomicReference<Timer> timer = new AtomicReference<>();
     private final AtomicInteger worker_count = new AtomicInteger(0);
     private final AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
 
     // Initialize volatile variables for maintaining concurrency
-    private volatile boolean waiting = true;
     private volatile boolean kill_all = false;
     private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
 
+    // Constructs a WebCrawler with UI components
     WebCrawler() {
         // Initialize an empty JFrame window and set it to visible
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -60,27 +57,20 @@ class WebCrawler extends JFrame {
 
         // Initialize Swing variables not used inside the Task class
         final var url_label = new JLabel("Start URL: ");
-        url_text.setName("UrlTextField");
-        run_button.setName("RunButton");
         final var workers_label = new JLabel("Workers: ");
         final var workers_text = new JTextField();
         final var depth_label = new JLabel("Maximum depth:  ");
         final var depth_text = new JTextField();
-        depth_text.setName("DepthTextField");
         final var depth_toggle = new JCheckBox("Enabled");
-        depth_toggle.setName("DepthCheckBox");
         final var time_limit_label = new JLabel("Time limit: ");
         final var time_limit_text = new JTextField();
         final var seconds_label = new JLabel("seconds");
         final var elapsed_time_label = new JLabel("Elapsed time: ");
         final var elapsed_time_updater = new JLabel("0:00");
         final var parsed_pages_label = new JLabel("Parsed pages: ");
-        parsed_pages_updater.setName("ParsedLabel");
         final var export_label = new JLabel("Export: ");
         final var export_text = new JTextField();
-        export_text.setName("ExportUrlTextField");
         final var save_button = new JButton("Save");
-        save_button.setName("ExportButton");
 
         // Below is the configuration of the layout within the JFrame window. Using a
         // GroupLayout manager, JComponents are added to JPanels when necessary and
@@ -236,6 +226,8 @@ class WebCrawler extends JFrame {
     private void run(JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text, JLabel elapsed_time_updater) {
         final var formatter = new SimpleDateFormat("m:ss");
         final var time = new AtomicLong(1000L);
+        final var start = new AtomicReference<Task>();
+        final var time_limit = new AtomicLong();
         run_button.addItemListener(e -> {
             if (run_button.getText().equals("Run") && run_button.isSelected()) {
                 run_button.setText("Stop");
@@ -243,28 +235,23 @@ class WebCrawler extends JFrame {
                 elapsed_time_updater.setText("0:00");
                 parsed_pages_updater.setText("0");
                 try {
-                    if (workers_text.getText().equals("")) worker_count.set(1);
-                    else worker_count.set(Integer.parseInt(workers_text.getText()));
+                    worker_count.set(Integer.parseInt(workers_text.getText()));
+                    if (worker_count.get() < 1) throw new IllegalArgumentException("worker_count < 1");
                     if (workers.get() == null) workers.set((ThreadPoolExecutor)Executors.newFixedThreadPool(worker_count.get()));
                     else if (workers.get().getCorePoolSize() != worker_count.get()) {
                         if (worker_count.get() > workers.get().getMaximumPoolSize()) workers.get().setMaximumPoolSize(worker_count.get());
                         workers.get().setCorePoolSize(worker_count.get());
                     }
-                    if (depth_toggle.isSelected()) max_depth = Integer.parseInt(depth_text.getText());
-                    else max_depth = Integer.parseInt(depth_text.getText());
                     kill_all = false;
-                    waiting = true;
                     crawled_pages.clear();
-                    if (depth_toggle.isSelected()) workers.get().submit(new Task(url_text.getText(), 0));
-                    else workers.get().submit(new Task(url_text.getText()));
+                    workers.get().prestartAllCoreThreads();
                     if (time_limit_toggle.isSelected()) {
+                        time_limit.set(Long.parseLong(time_limit_text.getText()));
                         time.set(1000L);
                         if (timer.get() == null) {
                             timer.set(new Timer(1000, evt -> {
-                                if (time.get() >= Long.parseLong(time_limit_text.getText()) * 1000L || workers.get().getActiveCount() == 0) {
+                                if (time.get() >= time_limit.get() * 1000L) {
                                     kill_all = true;
-                                    run_button.setText("Run");
-                                    run_button.setSelected(false);
                                     ((Timer)evt.getSource()).stop();
                                 }
                                 elapsed_time_updater.setText(formatter.format(time.get()));
@@ -273,21 +260,27 @@ class WebCrawler extends JFrame {
                         }
                         timer.get().restart();
                     }
+                    if (depth_toggle.isSelected()) {
+                        max_depth = Integer.parseInt(depth_text.getText());
+                        start.set(new Task(url_text.getText(), 0));
+                        workers.get().submit(start.get());
+                    }
+                    else {
+                        start.set(new Task(url_text.getText()));
+                        workers.get().submit(start.get());
+                    }
                 }
                 catch (IllegalArgumentException | RejectedExecutionException error) {
-                    // TODO add error popup window
+                    if (workers.get() != null) workers.get().getQueue().clear();
                     kill_all = true;
                     if (time_limit_toggle.isSelected() && timer.get() != null) timer.get().stop();
-                    visited.clear();
                     run_button.setText("Run");
-                    run_button.setSelected(false);
                 }
             }
             else if (run_button.getText().equals("Stop") && run_button.isSelected()) {
+                workers.get().getQueue().clear();
                 kill_all = true;
                 if (time_limit_toggle.isSelected()) timer.get().stop();
-                run_button.setText("Run");
-                run_button.setSelected(false);
             }
         });
     }
@@ -309,10 +302,7 @@ class WebCrawler extends JFrame {
                 }
                 output.close();
             }
-            catch (IOException error) {
-                // TODO add error popup window
-                error.printStackTrace();
-            }
+            catch (IOException ignored) {}
         });
     }
 
@@ -337,7 +327,8 @@ class WebCrawler extends JFrame {
             var index = url.lastIndexOf('/');
             if (url.charAt(index - 1) != '/') valid.set(url.substring(0, index + 1) + link);
             else valid.set(url + '/' + link);
-        } else if (no_protocol_matcher.matches()) valid.set(protocol + ':' + link);
+        }
+        else if (no_protocol_matcher.matches()) valid.set(protocol + ':' + link);
         else if (nosource_slash_matcher.matches()) {
             final var index = url.lastIndexOf('/');
             if (url.charAt(index - 1) != '/') valid.set(url.substring(0, index) + link);
@@ -347,11 +338,71 @@ class WebCrawler extends JFrame {
     }
 
     /**
-     * Represents a Task thread to be submitted as a worker to a threadpool.
+     * Helper method for checking redundancy when submitting work to the worker threads.
+     *
+     * @param url the url to connect to
+     * @param doc the Document to establish a connection for
+     * @return whether the url is redundant work or not
+     * @throws IOException if there was a problem connecting to the url
+     */
+    private boolean isRedundant(String url, AtomicReference<Document> doc) throws IOException {
+        doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
+        // If the Task is not set to die, and the url has not been crawled
+        // yet, add it to the list of crawled_pages as it will be crawled,
+        // otherwise mark the url as redundant as it has already been seen
+        if (!kill_all && !crawled_pages.containsKey(url)) {
+            crawled_pages.put(url, doc.get().title());
+            parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Main algorithm for crawling a webpage. Links are extracted from the doc by using
+     * Jsoup's cssQuery selector on anchor tags with href attributes. The value of each href
+     * is then extracted and either submitted to another worker thread, or, if the depth
+     * of the child link is equal to the set max depth, the link is crawled within the
+     * the current worker Task, effectively stopping worker Task submissions.
+     *
+     * @param doc document connected to url
+     * @param url url used to connect to doc
+     * @param protocol protocol of url
+     * @param depth depth of the current url
+     */
+    private void crawl(AtomicReference<Document> doc, String url, String protocol, Integer depth) throws RejectedExecutionException {
+        // Obtain all the href attributes in anchor tags found in the url's html
+        final var links = doc.get().select("a[href]");
+        for (var link : links) {
+            // Obtain the actual href value from this link's anchor tag
+            final var href_matcher = href_pattern.matcher(link.toString());
+            if (href_matcher.matches()) {
+                if (kill_all) break;
+                // Validate the matched href value and store it
+                final var valid = validateLink(href_matcher.group(2), url, protocol);
+                // Create the appropriate worker task for this valid link based on window input
+                if (depth == null) workers.get().submit(new Task(valid));
+                else if (depth + 1 == max_depth) {
+                    try {
+                        // The list of crawled_pages is checked to see if the current
+                        // link has been crawled already, if so it is skipped; if it is
+                        // not contained in the list, we connect to and add it
+                        isRedundant(valid, doc);
+                    }
+                    // Ignore validated links that fail
+                    catch (IOException ignored) {}
+                }
+                else workers.get().submit(new Task(valid, depth + 1));
+            }
+        }
+    }
+
+    /**
+     * Represents a Task thread to be submitted as a worker of a threadpool.
      */
     class Task implements Runnable {
 
-        private String url; // Url to connect to and acquire links from
+        private final String url; // Url to connect to and acquire links from
         private final Integer depth; // The current depth of this url
 
         // Constructs a Task with the current depth
@@ -360,7 +411,7 @@ class WebCrawler extends JFrame {
             this.depth = depth;
         }
 
-        // Constructs a Task without the current depth
+        // Constructs a Task ignoring depth
         private Task(String url) {
             this(url, null);
         }
@@ -369,159 +420,24 @@ class WebCrawler extends JFrame {
         public void run() {
             // Periodically make checks to see if the thread should be killed
             if (!kill_all) {
-                final var protocol = url.substring(0, url.indexOf("://"));
-                final var redundant = new AtomicBoolean(false);
-                final var doc = new AtomicReference<Document>();
                 try {
-                    // Acquire the lock and attempt to establish a connection to the url
-                    synchronized (this) {
-                        if (!kill_all) {
-                            // If successful, mark it as visited and add it to the list of crawled pages,
-                            // otherwise it's already been visited
-                            if (visited.contains(url)) {
-                                // If the start url is found within the crawl, and hasn't already been,
-                                // added to crawled_pages, add it
-                                if (crawled_pages.containsKey(url)) redundant.set(true);
-                                else {
-                                    doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
-                                    crawled_pages.put(url, doc.get().title());
-                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                }
-                            }
-                            else {
-                                visited.add(url);
-                                if (!url.equals(url_text.getText())) {
-                                    doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
-                                    crawled_pages.put(url, doc.get().title());
-                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                }
-                            }
-                        }
-                        else redundant.set(true);
-                    }
-                    // Check for redundancy based on whether the url has already been seen,
-                    // or the thread is set to die
-                    if (!redundant.get()) {
-                        // Obtain all the href attributes in <a> tags found from the url's html
-                        final var links = doc.get().select("a[href]");
-                        for (var link : links) {
-                            // Obtain the actual href value from the link's html <a> tag
-                            final var href_matcher = href_pattern.matcher(link.toString());
-                            if (href_matcher.matches()) {
-                                if (kill_all) break;
-                                // Validate the matched href value and store it
-                                final var valid = validateLink(href_matcher.group(2), url, protocol);
-                                // Create the appropriate worker task for this valid link based on window input
-                                if (depth == null) workers.get().submit(new Task(valid));
-                                else if (depth + 1 == max_depth) {
-                                    try {
-                                        // Again acquire the lock to attempt establishing a connection. We do this as
-                                        // the depth of this valid link is the maximum crawl depth, and we no longer
-                                        // wish to crawl this link for its links
-                                        synchronized (this) {
-                                            if (!crawled_pages.containsKey(valid)) {
-                                                doc.set(Jsoup.connect(valid).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
-                                                crawled_pages.put(valid, doc.get().title());
-                                                parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                            }
-                                        }
-                                    }
-                                    // Ignore validated links that fail
-                                    catch (IOException ignored) {}
-                                }
-                                else workers.get().submit(new Task(valid, depth + 1));
-                                if (waiting) waiting = false;
-                            }
-                        }
-                    }
+                    final var protocol = url.substring(0, url.indexOf("://"));
+                    final var doc = new AtomicReference<Document>();
+                    // If redundant skip the url
+                    if (!isRedundant(url, doc)) crawl(doc, url, protocol, depth);
                 }
-                catch (IOException e) {
-                    // Check to see if the exception was protocol related
-                    if (e instanceof HttpStatusException) {
-                        // Get the HTTP response code from the url
-                        final var status = ((HttpStatusException)e).getStatusCode();
-                        // If status 403 not found check to see if we can secure the http connection
-                        if (status == 403) {
-                            if (protocol.equals("http")) {
-                                url = "https" + url.substring(url.indexOf("://"));
-                                try {
-                                    // Acquire the lock and attempt to establish a secure connection to the url
-                                    synchronized (this) {
-                                        if (!kill_all) {
-                                            // If successful, mark it as visited and add it to the list of crawled pages,
-                                            // otherwise it's already been visited
-                                            if (visited.contains(url)) {
-                                                // If the start url is found within the crawl, and hasn't already been,
-                                                // added to crawled_pages, add it
-                                                if (crawled_pages.containsKey(url)) redundant.set(true);
-                                                else {
-                                                    doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
-                                                    crawled_pages.put(url, doc.get().title());
-                                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                                }
-                                            }
-                                            else {
-                                                visited.add(url);
-                                                if (!url.equals(url_text.getText())) {
-                                                    doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
-                                                    crawled_pages.put(url, doc.get().title());
-                                                    parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                                }
-                                            }
-                                        }
-                                        else redundant.set(true);
-                                    }
-                                    // Check for redundancy based on whether the url has already been seen,
-                                    // or the thread is set to die
-                                    if (!redundant.get()) {
-                                        // Obtain all the href attributes in <a> tags found from the url's html
-                                        final var links = doc.get().select("a[href]");
-                                        for (var link : links) {
-                                            // Obtain the actual href value from the link's html <a> tag
-                                            final var href_matcher = href_pattern.matcher(link.toString());
-                                            if (href_matcher.matches()) {
-                                                if (kill_all) break;
-                                                // Validate the matched href value and store it
-                                                final var valid = validateLink(href_matcher.group(2), url, protocol);
-                                                // Create the appropriate worker task for this valid link based on window input
-                                                if (depth == null) workers.get().submit(new Task(valid));
-                                                else if (depth + 1 == max_depth) {
-                                                    try {
-                                                        // Again acquire the lock to attempt establishing a connection. We do this as
-                                                        // the depth of this valid link is the maximum crawl depth, and we no longer
-                                                        // wish to crawl this link for its links
-                                                        synchronized (this) {
-                                                            if (!crawled_pages.containsKey(valid)) {
-                                                                doc.set(Jsoup.connect(valid).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
-                                                                crawled_pages.put(valid, doc.get().title());
-                                                                parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
-                                                            }
-                                                        }
-                                                    }
-                                                    // Ignore validated links that fail
-                                                    catch (IOException ignored) {}
-                                                }
-                                                else workers.get().submit(new Task(valid, depth + 1));
-                                                if (waiting) waiting = false;
-                                            }
-                                        }
-                                    }
-                                }
-                                // Ignore secure urls that fail
-                                catch (IOException ignored) {}
-                            }
-                        }
-                    }
-                }
-                synchronized (this) {
-                    if (workers.get().getActiveCount() == 1 && workers.get().getQueue().size() == 0) {
-                        visited.clear();
+                catch (IOException | IndexOutOfBoundsException ignored) {}
+                // If this Task is the only task running at this point and there is no
+                // more work to be done, the UI updates to reflect the completion
+                if (workers.get().getActiveCount() == 1 && workers.get().getQueue().size() == 0) {
+                    if (time_limit_toggle.isSelected()) timer.get().stop();
+                    if (run_button.isSelected()){
                         run_button.setText("Run");
                         run_button.setSelected(false);
                     }
+                    else run_button.setText("Run");
                 }
             }
         }
     }
 }
-
