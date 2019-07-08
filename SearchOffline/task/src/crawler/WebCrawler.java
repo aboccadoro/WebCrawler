@@ -338,7 +338,7 @@ class WebCrawler extends JFrame {
                         try {
                             crawl_size.set(crawled_pages.size());
                             progress.set(0);
-                            conn.set(DriverManager.getConnection("jdbc:mysql://localhost:3306/crawled_pages?useSSL=false", "aboccadoro", "rvbtpbafA13"));
+                            conn.set(DriverManager.getConnection("jdbc:mysql://localhost:3306/crawled_pages?useSSL=false", "aboccadoro", ""));
                             for (var entry : crawled_pages.entrySet()) {
                                 try {
                                     ps.set(conn.get().prepareStatement("insert into pages (url, title) values (?, ?)"));
