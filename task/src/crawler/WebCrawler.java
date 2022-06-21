@@ -1,19 +1,22 @@
 package crawler;
 
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+
 import javax.swing.*;
-import javax.swing.Timer;
 import java.awt.*;
-import java.io.*;
-import java.sql.*;
+import java.io.IOException;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.text.SimpleDateFormat;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.Hashtable;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
-import org.jsoup.Jsoup;
-import org.jsoup.nodes.Document;
 
 /**
  * Implementation of a web crawler based off the Hyperskill.org project
@@ -47,7 +50,7 @@ class WebCrawler extends JFrame {
 
     // Initialize volatile variables for maintaining concurrency
     private volatile boolean kill_all = false;
-    private volatile Hashtable<String, String> crawled_pages = new Hashtable<>();
+    private final Hashtable<String, String> crawled_pages = new Hashtable<>();
 
     // Constructs a WebCrawler with UI components
     private WebCrawler() {
@@ -222,7 +225,7 @@ class WebCrawler extends JFrame {
     }
 
     /**
-     * Runs the WebCrawler instance
+     * Runs the WebCrawler instance on a new thread to not block the Event Dispatch thread.
      *
      * @param args placeholder empty argument array
      */
@@ -321,8 +324,6 @@ class WebCrawler extends JFrame {
      * @param database_label_updater label to update UI on percent complete
      */
     private void upload(JLabel database_label_updater, JLabel pages_added_updater, JLabel redundant_pages_updater) {
-        final var conn = new AtomicReference<Connection>();
-        final var ps = new AtomicReference<PreparedStatement>();
         final var progress = new AtomicInteger();
         final var crawl_size = new AtomicInteger();
         final var pages_added = new AtomicInteger();
@@ -336,24 +337,25 @@ class WebCrawler extends JFrame {
                     redundant_pages.set(0);
                     workers.get().submit(() -> {
                         try {
+                            final var conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/crawled_pages?useSSL=false", "Anthony", "rvbtpbafA13");
                             crawl_size.set(crawled_pages.size());
                             progress.set(0);
-                            conn.set(DriverManager.getConnection("jdbc:mysql://localhost:3306/crawled_pages?useSSL=false", "aboccadoro", ""));
                             for (var entry : crawled_pages.entrySet()) {
                                 try {
-                                    ps.set(conn.get().prepareStatement("insert into pages (url, title) values (?, ?)"));
-                                    ps.get().setObject(1, entry.getKey());
-                                    ps.get().setObject(2, entry.getValue());
-                                    ps.get().executeUpdate();
+                                    final var ps = conn.prepareStatement("insert into pages (Title, URL) values (?, ?)");
+                                    ps.setObject(1, entry.getValue());
+                                    ps.setObject(2, entry.getKey());
+                                    ps.executeUpdate();
                                     pages_added_updater.setText(String.valueOf(pages_added.incrementAndGet()));
                                 }
-                                catch (SQLException ignored) {
-                                    redundant_pages_updater.setText(String.valueOf(redundant_pages.incrementAndGet()));
+                                catch (SQLException dup) {
+                                    // if the error code is a duplicate entry error this page is a duplicate
+                                    if (dup.getErrorCode() == 1062) redundant_pages_updater.setText(String.valueOf(redundant_pages.incrementAndGet()));
                                 }
                                 database_label_updater.setText((int)(((double)progress.incrementAndGet() / crawl_size.get()) * 100) + "%");
                             }
-                            conn.get().close();
-                            ps.get().close();
+                            // close the jdbc connection and free up used resources immediately
+                            conn.close();
                         }
                         catch (SQLException ignored) {}
                         if (upload_button.getText().equals("Wait")) upload_button.setText("Upload");
@@ -425,7 +427,7 @@ class WebCrawler extends JFrame {
      * Jsoup's cssQuery selector on anchor tags with href attributes. The value of each href
      * is then extracted and either submitted to another worker thread, or, if the depth
      * of the child link is equal to the set max depth, the link is crawled within the
-     * the current worker Task, effectively stopping worker Task submissions.
+     * current worker Task, effectively stopping worker Task submissions.
      *
      * @param doc document connected to url
      * @param url url used to connect to doc
