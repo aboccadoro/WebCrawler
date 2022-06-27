@@ -18,7 +18,7 @@ rootProject.projectDir.eachDirRecurse {
     project(":$moduleName").projectDir = it
 }
 
-def isTaskDir(File dir) {
+static def isTaskDir(File dir) {
     return new File(dir, "src").exists()
 }
 

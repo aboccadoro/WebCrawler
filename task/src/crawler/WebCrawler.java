@@ -378,44 +378,41 @@ class WebCrawler extends JFrame {
      *
      * @param link link to validate
      * @param url parent of link
-     * @param protocol protocol of url
      * @return link either validated or not
      */
-    private String validateLink(String link, String url, String protocol) {
+    private String validateLink(String link, String url) throws IndexOutOfBoundsException {
+        final var protocol = url.substring(0, url.indexOf("://"));
         final var relative_matcher = relative_pattern.matcher(link);
         final var no_protocol_matcher = no_protocol_pattern.matcher(link);
         final var nosource_slash_matcher = nosource_slash_pattern.matcher(link);
         final var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link);
-        final var valid = new AtomicReference<>(link);
+        var valid = link;
         if (relative_matcher.matches() || (nosource_noslash_matcher.matches() && !link.contains("://"))) {
             var index = url.lastIndexOf('/');
-            if (url.charAt(index - 1) != '/') valid.set(url.substring(0, index + 1) + link);
-            else valid.set(url + '/' + link);
+            if (url.charAt(index - 1) != '/') valid = url.substring(0, index + 1) + link;
+            else valid = url + '/' + link;
         }
-        else if (no_protocol_matcher.matches()) valid.set(protocol + ':' + link);
+        else if (no_protocol_matcher.matches()) valid = protocol + ':' + link;
         else if (nosource_slash_matcher.matches()) {
             final var index = url.lastIndexOf('/');
-            if (url.charAt(index - 1) != '/') valid.set(url.substring(0, index) + link);
-            else valid.set(url + link);
+            if (url.charAt(index - 1) != '/') valid = url.substring(0, index) + link;
+            else valid = url + link;
         }
-        return valid.get();
+        return valid;
     }
 
     /**
      * Helper method for checking redundancy when submitting work to the worker threads.
      *
      * @param url the url to connect to
-     * @param doc the Document to establish a connection for
      * @return whether the url is redundant work or not
-     * @throws IOException if there was a problem connecting to the url
      */
-    private boolean isRedundant(String url, AtomicReference<Document> doc) throws IOException {
-        doc.set(Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get());
+    private boolean isRedundant(String url, Document doc) {
         // If the Task is not set to die, and the url has not been crawled
         // yet, add it to the list of crawled_pages as it will be crawled,
         // otherwise mark the url as redundant as it has already been seen
         if (!kill_all && !crawled_pages.containsKey(url)) {
-            crawled_pages.put(url, doc.get().title());
+            crawled_pages.put(url, doc.title());
             parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
             return false;
         }
@@ -431,33 +428,26 @@ class WebCrawler extends JFrame {
      *
      * @param doc document connected to url
      * @param url url used to connect to doc
-     * @param protocol protocol of url
      * @param depth depth of the current url
      * @throws RejectedExecutionException if the work could not be executed
      */
-    private void crawl(AtomicReference<Document> doc, String url, String protocol, Integer depth) throws RejectedExecutionException {
+    private void crawl(Document doc, String url, Integer depth) {
         // Obtain all the href attributes in anchor tags found in the url's html
-        final var links = doc.get().select("a[href]");
+        final var links = doc.select("a[href]");
         for (var link : links) {
             // Obtain the actual href value from this link's anchor tag
             final var href_matcher = href_pattern.matcher(link.toString());
             if (href_matcher.matches()) {
                 if (kill_all) break;
-                // Validate the matched href value and store it
-                final var valid = validateLink(href_matcher.group(2), url, protocol);
-                // Create the appropriate worker task for this valid link based on window input
-                if (depth == null) workers.get().submit(new Task(valid));
-                else if (depth + 1 == max_depth) {
-                    try {
-                        // The list of crawled_pages is checked to see if the current
-                        // link has been crawled already, if so it is skipped; if it is
-                        // not contained in the list, we connect to and add it
-                        isRedundant(valid, doc);
-                    }
-                    // Ignore validated links that fail
-                    catch (IOException ignored) {}
+                try {
+                    // Validate the matched href value and store it
+                    final var valid = validateLink(href_matcher.group(2), url);
+                    // Create the appropriate worker task for this valid link based on window input
+                    if (depth == null) workers.get().submit(new Task(valid));
+                    else if (depth < max_depth) workers.get().submit(new Task(valid, depth + 1));
+                    // If the current depth is equal to max_depth we stop adding work
                 }
-                else workers.get().submit(new Task(valid, depth + 1));
+                catch (IndexOutOfBoundsException | RejectedExecutionException ignored) {}
             }
         }
     }
@@ -486,17 +476,17 @@ class WebCrawler extends JFrame {
             // Periodically make checks to see if the thread should be killed
             if (!kill_all) {
                 try {
-                    final var protocol = url.substring(0, url.indexOf("://"));
-                    final var doc = new AtomicReference<Document>();
-                    // If redundant skip the url
-                    if (!isRedundant(url, doc)) crawl(doc, url, protocol, depth);
+                    // Create a Document representing a connection to the url
+                    final var doc = Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get();
+                    // If already seen skip the url
+                    if (!isRedundant(url, doc)) crawl(doc, url, depth);
                 }
-                catch (IOException | IndexOutOfBoundsException ignored) {}
+                catch (IOException ignored) {}
                 // If this Task is the only task running at this point and there is no
                 // more work to be done, the UI updates to reflect the completion
                 if (workers.get().getActiveCount() == 1 && workers.get().getQueue().size() == 0) {
                     if (time_limit_toggle.isSelected()) timer.get().stop();
-                    if (run_button.isSelected()){
+                    if (run_button.isSelected()) {
                         run_button.setText("Run");
                         run_button.setSelected(false);
                     }

@@ -25,8 +25,8 @@ subprojects {
     }
 
     dependencies {
-        compile 'org.jsoup:jsoup:1.12.1'
-        compile group: 'mysql', name: 'mysql-connector-java', version: '5.1.44'
+        implementation 'org.jsoup:jsoup:1.15.1'
+        implementation group: 'mysql', name: 'mysql-connector-java', version: '5.1.44'
     }
 
     sourceSets {
@@ -35,5 +35,5 @@ subprojects {
 }
 
 wrapper {
-    gradleVersion = '5.3.1'
+    gradleVersion = '7.4.2'
 }
