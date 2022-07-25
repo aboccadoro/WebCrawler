@@ -17,7 +17,7 @@
 @if "%DEBUG%" == "" @echo off
 @rem ##########################################################################
 @rem
-@rem  util startup script for Windows
+@rem  task startup script for Windows
 @rem
 @rem ##########################################################################
 
@@ -32,7 +32,7 @@ set APP_HOME=%DIRNAME%..
 @rem Resolve any "." and ".." in APP_HOME to make it shorter.
 for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
 
-@rem Add default JVM options here. You can also use JAVA_OPTS and UTIL_OPTS to pass JVM options to this script.
+@rem Add default JVM options here. You can also use JAVA_OPTS and TASK_OPTS to pass JVM options to this script.
 set DEFAULT_JVM_OPTS=
 
 @rem Find java.exe
@@ -67,20 +67,20 @@ goto fail
 :execute
 @rem Setup the command line
 
-set CLASSPATH=%APP_HOME%\lib\util.jar;%APP_HOME%\lib\jsoup-1.15.1.jar;%APP_HOME%\lib\mysql-connector-java-8.0.13.jar;%APP_HOME%\lib\protobuf-java-3.6.1.jar
+set CLASSPATH=%APP_HOME%\lib\task.jar;%APP_HOME%\lib\jsoup-1.15.1.jar;%APP_HOME%\lib\mysql-connector-java-8.0.13.jar;%APP_HOME%\lib\protobuf-java-3.6.1.jar
 
 
-@rem Execute util
-"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %UTIL_OPTS%  -classpath "%CLASSPATH%" crawler.WebCrawler %*
+@rem Execute task
+"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %TASK_OPTS%  -classpath "%CLASSPATH%" crawler.WebCrawler %*
 
 :end
 @rem End local scope for the variables with windows NT shell
 if "%ERRORLEVEL%"=="0" goto mainEnd
 
 :fail
-rem Set variable UTIL_EXIT_CONSOLE if you need the _script_ return code instead of
+rem Set variable TASK_EXIT_CONSOLE if you need the _script_ return code instead of
 rem the _cmd.exe /c_ return code!
-if  not "" == "%UTIL_EXIT_CONSOLE%" exit 1
+if  not "" == "%TASK_EXIT_CONSOLE%" exit 1
 exit /b 1
 
 :mainEnd

@@ -6,16 +6,13 @@ import org.jsoup.nodes.Document;
 import javax.swing.*;
 import java.awt.*;
 import java.io.IOException;
+import java.net.URL;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.text.SimpleDateFormat;
-import java.util.Hashtable;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 /**
@@ -24,33 +21,41 @@ import java.util.regex.Pattern;
 class WebCrawler extends JFrame {
 
     // Regex to extract href attributes from anchor tags
-    private final Pattern href_pattern = Pattern.compile("(?Uis).*href=(['\"])(.*?)\\1.*"); //  : <a href="https://example.com/page.html">example</a>
+    private static final Pattern href = Pattern.compile("(?Uis).*href=(['\"])(.*?)\\1.*"); //      : <a href="https://example.com/page.html">example</a>
     // Regex matching relative links without '/'
-    private final Pattern relative_pattern = Pattern.compile("(?Ui)^([^/]+)"); //               : example.com, page.html
+    private static final Pattern domain = Pattern.compile("(?Ui)^[^/]+"); //                     : example.com
     // Regex matching links missing a protocol
-    private final Pattern no_protocol_pattern = Pattern.compile("(?Ui)^//.+"); //               : //example.com/page.html
+    private static final Pattern no_scheme = Pattern.compile("(?Ui)^//.+"); //                     : //example.com/page.html
     // Regex matching relative links starting with '/'
-    private final Pattern nosource_slash_pattern = Pattern.compile("(?Ui)^/[^/]+.*"); //        : /page.html
+    private static final Pattern slash_subdirectory = Pattern.compile("(?Ui)^/[^/]+.*"); //        : /page.html
     // Regex matching relative links not starting with a '/'
-    private final Pattern nosource_noslash_pattern = Pattern.compile("(?Ui)^[^/]+.+/[^/]*"); // : page.html
+    private static final Pattern noslash_subdirectory = Pattern.compile("(?Ui)^[^/]+.+/[^/]*"); // : page.html
 
     // Initialize swing variables accessed in Task
-    private final JTextField url_text = new JTextField();
-    private final JButton upload_button = new JButton("Upload");
-    private final JLabel parsed_pages_updater = new JLabel("0");
-    private final JLabel database_label_updater = new JLabel("0%");
-    private final JToggleButton run_button = new JToggleButton("Run");
-    private final JCheckBox time_limit_toggle = new JCheckBox("Enabled");
+    private static final JTextField url_text = new JTextField();
+    private static final JButton upload_button = new JButton("Upload");
+    private static final JLabel parsed_pages_updater = new JLabel("0");
+    private static final JLabel database_label_updater = new JLabel("0%");
+    private static final JButton run_button = new JButton("Run");
+    private static final JCheckBox time_limit_toggle = new JCheckBox("Enabled");
+
+    // Initialize all Swing entities updating the UI & I/O
+    private static final JTextField workers_text = new JTextField();
+    private static final  JTextField depth_text = new JTextField();
+    private static final JCheckBox depth_toggle = new JCheckBox("Enabled");
+    private static final JTextField time_limit_text = new JTextField();
+    private static final JLabel elapsed_time_updater = new JLabel("0:00");
+    private static final JLabel pages_added_updater = new JLabel("0");
+    private static final JLabel redundant_pages_updater = new JLabel("0");
+
 
     // Initialize variables associated with performing the crawl
-    private int max_depth = 0;
-    private final AtomicReference<Timer> timer = new AtomicReference<>();
-    private final AtomicInteger worker_count = new AtomicInteger(0);
-    private final AtomicReference<ThreadPoolExecutor> workers = new AtomicReference<>();
+    private static int max_depth = 0;
+    private static final Timer timer = new Timer(1000, null);
+    private static ThreadPoolExecutor workers = (ThreadPoolExecutor)Executors.newFixedThreadPool(1);
 
-    // Initialize volatile variables for maintaining concurrency
-    private volatile boolean kill_all = false;
-    private final Hashtable<String, String> crawled_pages = new Hashtable<>();
+    // Initialize HashMap for maintaining concurrency
+    private final ConcurrentHashMap<String, String> crawled_pages = new ConcurrentHashMap<>();
 
     // Constructs a WebCrawler with UI components
     private WebCrawler() {
@@ -60,24 +65,17 @@ class WebCrawler extends JFrame {
         setTitle("Web Crawler");
         setVisible(true);
 
-        // Initialize Swing variables not used inside the Task class
+        // Initialize the JLabels, which do not change
         final var url_label = new JLabel("Start URL: ");
         final var workers_label = new JLabel("Workers: ");
-        final var workers_text = new JTextField();
         final var depth_label = new JLabel("Maximum depth:  ");
-        final var depth_text = new JTextField();
-        final var depth_toggle = new JCheckBox("Enabled");
         final var time_limit_label = new JLabel("Time limit: ");
-        final var time_limit_text = new JTextField();
         final var seconds_label = new JLabel("seconds");
         final var elapsed_time_label = new JLabel("Elapsed time: ");
-        final var elapsed_time_updater = new JLabel("0:00");
         final var parsed_pages_label = new JLabel("Parsed pages: ");
         final var database_label = new JLabel("Database: ");
         final var pages_added_label = new JLabel("Added:");
-        final var pages_added_updater = new JLabel("0");
         final var redundant_pages_label = new JLabel("Redundant:");
-        final var redundant_pages_updater = new JLabel("0");
 
         // Below is the configuration of the layout within the JFrame window. Using a
         // GroupLayout manager, JComponents are added to JPanels when necessary and
@@ -219,9 +217,8 @@ class WebCrawler extends JFrame {
         setContentPane(input_pane);
         setSize(500, 250);
 
-        run(workers_text, depth_text, depth_toggle, time_limit_text, elapsed_time_updater,
-                pages_added_updater, redundant_pages_updater);
-        upload(database_label_updater, pages_added_updater, redundant_pages_updater);
+        run();
+        upload();
     }
 
     /**
@@ -235,107 +232,98 @@ class WebCrawler extends JFrame {
 
 
     /**
-     * Defines the action performed when the run_button is clicked. An item listener is
-     * added to this JToggleButton to allow for run/stop functionality. The system starts
-     * with the run_button unselected and with text set to "Run". After being clicked, the
-     * text changes to "Stop" and again is set to unselected. The reason to set the button's
-     * selected state to false is to ensure the differentiation when starting and stopping.
-     * By deselecting the button upon every action the button has a more aesthetic appeal
-     * in the UI and works in tandem with the button's text to control starting/stopping.
-     *
-     * @param workers_text amount of worker threads to use
-     * @param depth_text maximum depth
-     * @param depth_toggle toggles the use of depth_text
-     * @param time_limit_text time limit
-     * @param elapsed_time_updater updates the UI based on timer
+     * Defines the action performed when the run_button is clicked. Start/stop functionality
+     * is implemented here. The run_button text will change from "Run" to "Stop" and vice
+     * versa upon clicking the button. If the button is clicked in a state where work is
+     * still being computed, the text will change to "Wait!" until the work has completed,
+     * in which case the text will read "Run."
      */
-    private void run(JTextField workers_text, JTextField depth_text, JCheckBox depth_toggle, JTextField time_limit_text, JLabel elapsed_time_updater,
-                     JLabel pages_added_updater, JLabel redundant_pages_updater) {
+    private void run() {
         final var formatter = new SimpleDateFormat("m:ss");
         final var time = new AtomicLong(1000L);
         final var time_limit = new AtomicLong();
-        run_button.addItemListener(e -> {
-            if (run_button.getText().equals("Run") && run_button.isSelected()) {
-                try {
-                    worker_count.set(Integer.parseInt(workers_text.getText()));
-                    if (worker_count.get() < 1) throw new IllegalArgumentException("worker_count < 1");
-                    if (workers.get() == null) workers.set((ThreadPoolExecutor)Executors.newFixedThreadPool(worker_count.get()));
-                    else if (workers.get().getActiveCount() > 0) {
-                        run_button.setText("Wait");
-                        run_button.setSelected(false);
-                    }
-                    else if (workers.get().getCorePoolSize() != worker_count.get()) {
-                        if (worker_count.get() > workers.get().getMaximumPoolSize()) workers.get().setMaximumPoolSize(worker_count.get());
-                        workers.get().setCorePoolSize(worker_count.get());
-                    }
-                    if (!run_button.getText().equals("Wait")) {
-                        run_button.setText("Stop");
-                        run_button.setSelected(false);
-                        elapsed_time_updater.setText("0:00");
-                        parsed_pages_updater.setText("0");
-                        database_label_updater.setText("0%");
-                        pages_added_updater.setText("0");
-                        redundant_pages_updater.setText("0");
-                        kill_all = false;
-                        crawled_pages.clear();
-                        workers.get().prestartAllCoreThreads();
-                        if (time_limit_toggle.isSelected()) {
-                            time_limit.set(Long.parseLong(time_limit_text.getText()));
-                            time.set(1000L);
-                            if (timer.get() == null) {
-                                timer.set(new Timer(1000, evt -> {
-                                    if (time.get() >= time_limit.get() * 1000L) {
-                                        workers.get().getQueue().clear();
-                                        kill_all = true;
-                                        ((Timer)evt.getSource()).stop();
-                                    }
-                                    elapsed_time_updater.setText(formatter.format(time.get()));
-                                    time.set(time.get() + 1000L);
-                                }));
-                            }
-                            timer.get().restart();
-                        }
-                        if (depth_toggle.isSelected()) {
-                            max_depth = Integer.parseInt(depth_text.getText());
-                            workers.get().submit(new Task(url_text.getText(), 0));
-                        }
-                        else workers.get().submit(new Task(url_text.getText()));
-                    }
-                }
-                catch (IllegalArgumentException | RejectedExecutionException error) {
-                    if (workers.get() != null) workers.get().getQueue().clear();
-                    kill_all = true;
-                    if (time_limit_toggle.isSelected() && timer.get() != null) timer.get().stop();
+        run_button.addActionListener(e -> {
+            try {
+                if (run_button.getText().equals("Stop")) {
+                    workers.shutdown();
+                    workers = (ThreadPoolExecutor)Executors.newFixedThreadPool(1);
+                    if (time_limit_toggle.isSelected()) timer.stop();
                     run_button.setText("Run");
+                    if (upload_button.getText().equals("Wait!")) upload_button.setText("Upload");
+                }
+                else if (workers.getActiveCount() > 0) run_button.setText("Wait!");
+                else {
+                    run_button.setText("Stop");
+                    final var worker_count = Integer.parseInt(workers_text.getText());
+                    if (worker_count < 1 || worker_count > 100) throw new IllegalArgumentException("worker_count invalid");
+                    else if (worker_count > workers.getMaximumPoolSize()) {
+                        workers.setMaximumPoolSize(worker_count);
+                        workers.setCorePoolSize(worker_count);
+                    }
+                    else {
+                        workers.setCorePoolSize(worker_count);
+                        workers.setMaximumPoolSize(worker_count);
+                    }
+                    workers.prestartAllCoreThreads();
+                    elapsed_time_updater.setText("0:00");
+                    parsed_pages_updater.setText("0");
+                    database_label_updater.setText("0%");
+                    pages_added_updater.setText("0");
+                    redundant_pages_updater.setText("0");
+                    crawled_pages.clear();
+                    if (time_limit_toggle.isSelected()) {
+                        time_limit.set(Long.parseLong(time_limit_text.getText()));
+                        time.set(1000L);
+                        if (timer.getActionListeners().length == 0) {
+                            timer.addActionListener(evt -> {
+                                if (time.get() >= time_limit.get() * 1000L) {
+                                    workers.shutdown();
+                                    workers = (ThreadPoolExecutor)Executors.newFixedThreadPool(1);
+                                    ((Timer) evt.getSource()).stop();
+                                    if (run_button.getText().equals("Stop")) run_button.setText("Run");
+                                }
+                                elapsed_time_updater.setText(formatter.format(time.get()));
+                                time.set(time.get() + 1000L);
+                            });
+                        }
+                        timer.restart();
+                    }
+                    // Quickly test to see if the input is a website
+                    new URL(url_text.getText()).openConnection().connect();
+                    if (depth_toggle.isSelected()) {
+                        max_depth = Integer.parseInt(depth_text.getText());
+                        workers.submit(new Task(url_text.getText(), 0));
+                    }
+                    else workers.submit(new Task(url_text.getText()));
                 }
             }
-            else if (run_button.getText().equals("Stop") && run_button.isSelected()) {
-                workers.get().getQueue().clear();
-                kill_all = true;
-                if (time_limit_toggle.isSelected()) timer.get().stop();
+            catch (IllegalArgumentException | RejectedExecutionException | NullPointerException | IOException error) {
+                if (workers.getActiveCount() > 0) workers.shutdown();
+                workers = (ThreadPoolExecutor)Executors.newFixedThreadPool(1);
+                if (time_limit_toggle.isSelected() && timer.getActionListeners().length != 0) timer.stop();
+                run_button.setText("Run");
+                if (upload_button.getText().equals("Wait!")) upload_button.setText("Upload");
             }
         });
     }
 
     /**
-     * Defines the action performed when the export_button is clicked. The button's
-     * state is selected to false upon every action for aesthetic appeal in the UI.
-     *
-     * @param database_label_updater label to update UI on percent complete
+     * Defines the action performed when the upload_button is clicked.
      */
-    private void upload(JLabel database_label_updater, JLabel pages_added_updater, JLabel redundant_pages_updater) {
+    private void upload() {
         final var progress = new AtomicInteger();
         final var crawl_size = new AtomicInteger();
         final var pages_added = new AtomicInteger();
         final var redundant_pages = new AtomicInteger();
         upload_button.addActionListener(e -> {
             try {
-                if (workers.get().getActiveCount() == 0) {
+                if (workers.getActiveCount() == 0) {
+                    upload_button.setText("Upload");
                     pages_added_updater.setText("0");
                     pages_added.set(0);
                     redundant_pages_updater.setText("0");
                     redundant_pages.set(0);
-                    workers.get().submit(() -> {
+                    workers.submit(() -> {
                         try {
                             final var conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/crawled_pages?useSSL=false", "Anthony", "rvbtpbafA13");
                             crawl_size.set(crawled_pages.size());
@@ -356,17 +344,15 @@ class WebCrawler extends JFrame {
                             }
                             // close the jdbc connection and free up used resources immediately
                             conn.close();
+                            if (upload_button.getText().equals("Wait!")) upload_button.setText("Upload");
+                            if (run_button.getText().equals("Wait!")) run_button.setText("Run");
                         }
                         catch (SQLException ignored) {}
-                        if (upload_button.getText().equals("Wait")) upload_button.setText("Upload");
                     });
                 }
-                else if (!upload_button.getText().equals("Wait")) upload_button.setText("Wait");
+                else if (!upload_button.getText().equals("Wait!")) upload_button.setText("Wait!");
             }
-            catch (NullPointerException error) {
-                error.printStackTrace();
-            }
-            if (!run_button.getText().equals("Run")) run_button.setText("Run");
+            catch (NullPointerException ignored) {}
         });
     }
 
@@ -380,25 +366,24 @@ class WebCrawler extends JFrame {
      * @param url parent of link
      * @return link either validated or not
      */
-    private String validateLink(String link, String url) throws IndexOutOfBoundsException {
-        final var protocol = url.substring(0, url.indexOf("://"));
-        final var relative_matcher = relative_pattern.matcher(link);
-        final var no_protocol_matcher = no_protocol_pattern.matcher(link);
-        final var nosource_slash_matcher = nosource_slash_pattern.matcher(link);
-        final var nosource_noslash_matcher = nosource_noslash_pattern.matcher(link);
-        var valid = link;
-        if (relative_matcher.matches() || (nosource_noslash_matcher.matches() && !link.contains("://"))) {
+    private String validateLink(String link, String url) {
+        final var scheme = url.contains("://") ? url.substring(0, url.indexOf("://")) : "https";
+        final var domain_matcher = domain.matcher(link);
+        final var no_scheme_matcher = no_scheme.matcher(link);
+        final var slash_subdirectory_matcher = slash_subdirectory.matcher(link);
+        final var noslash_subdirectory__matcher = noslash_subdirectory.matcher(link);
+        if (domain_matcher.matches() || (noslash_subdirectory__matcher.matches() && !link.contains("://"))) {
             var index = url.lastIndexOf('/');
-            if (url.charAt(index - 1) != '/') valid = url.substring(0, index + 1) + link;
-            else valid = url + '/' + link;
+            if (index > 0 && url.charAt(index - 1) != '/') return url.substring(0, index + 1) + link;
+            else return url + '/' + link;
         }
-        else if (no_protocol_matcher.matches()) valid = protocol + ':' + link;
-        else if (nosource_slash_matcher.matches()) {
+        else if (no_scheme_matcher.matches()) return scheme + ':' + link;
+        else if (slash_subdirectory_matcher.matches()) {
             final var index = url.lastIndexOf('/');
-            if (url.charAt(index - 1) != '/') valid = url.substring(0, index) + link;
-            else valid = url + link;
+            if (index > 0 && url.charAt(index - 1) != '/') return url.substring(0, index) + link;
+            else return url + link;
         }
-        return valid;
+        return link;
     }
 
     /**
@@ -411,7 +396,7 @@ class WebCrawler extends JFrame {
         // If the Task is not set to die, and the url has not been crawled
         // yet, add it to the list of crawled_pages as it will be crawled,
         // otherwise mark the url as redundant as it has already been seen
-        if (!kill_all && !crawled_pages.containsKey(url)) {
+        if (!crawled_pages.containsKey(url)) {
             crawled_pages.put(url, doc.title());
             parsed_pages_updater.setText(String.valueOf(crawled_pages.size()));
             return false;
@@ -431,21 +416,21 @@ class WebCrawler extends JFrame {
      * @param depth depth of the current url
      * @throws RejectedExecutionException if the work could not be executed
      */
-    private void crawl(Document doc, String url, Integer depth) {
+    private void crawl(String url, Document doc, Integer depth) {
         // Obtain all the href attributes in anchor tags found in the url's html
         final var links = doc.select("a[href]");
         for (var link : links) {
             // Obtain the actual href value from this link's anchor tag
-            final var href_matcher = href_pattern.matcher(link.toString());
+            final var href_matcher = href.matcher(link.toString());
             if (href_matcher.matches()) {
-                if (kill_all) break;
                 try {
+
                     // Validate the matched href value and store it
                     final var valid = validateLink(href_matcher.group(2), url);
                     // Create the appropriate worker task for this valid link based on window input
-                    if (depth == null) workers.get().submit(new Task(valid));
-                    else if (depth < max_depth) workers.get().submit(new Task(valid, depth + 1));
-                    // If the current depth is equal to max_depth we stop adding work
+                    if (depth == null) workers.submit(new Task(valid));
+                    else if (depth < max_depth) workers.submit(new Task(valid, depth + 1));
+                    // If the current depth is equal to max_depth we stop submitting work
                 }
                 catch (IndexOutOfBoundsException | RejectedExecutionException ignored) {}
             }
@@ -473,26 +458,20 @@ class WebCrawler extends JFrame {
 
         @Override
         public void run() {
-            // Periodically make checks to see if the thread should be killed
-            if (!kill_all) {
-                try {
-                    // Create a Document representing a connection to the url
-                    final var doc = Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get();
-                    // If already seen skip the url
-                    if (!isRedundant(url, doc)) crawl(doc, url, depth);
-                }
-                catch (IOException ignored) {}
-                // If this Task is the only task running at this point and there is no
-                // more work to be done, the UI updates to reflect the completion
-                if (workers.get().getActiveCount() == 1 && workers.get().getQueue().size() == 0) {
-                    if (time_limit_toggle.isSelected()) timer.get().stop();
-                    if (run_button.isSelected()) {
-                        run_button.setText("Run");
-                        run_button.setSelected(false);
-                    }
-                    else run_button.setText("Run");
-                    if (upload_button.getText().equals("Wait")) upload_button.setText("Upload");
-                }
+            try {
+                // Create a Document representing a connection to the url
+                final var doc = Jsoup.connect(url).userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0").get();
+                // If already seen skip the url
+                if (!isRedundant(url, doc)) crawl(url, doc, depth);
+            }
+            // Ignore URLs that fail to connect
+            catch (IOException ignored) {}
+            // If this Task is the only task running at this point and there is no
+            // more work to be done, the UI updates to reflect the completion
+            if (workers.getActiveCount() == 1 && workers.getQueue().size() == 0) {
+                if (time_limit_toggle.isSelected()) timer.stop();
+                if (!run_button.getText().equals("Run")) run_button.setText("Run");
+                if (!upload_button.getText().equals("Upload")) upload_button.setText("Upload");
             }
         }
     }

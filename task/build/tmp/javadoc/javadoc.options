@@ -1,0 +1,7 @@
+-classpath 'C:\\Users\\Anthony\\Code\\WebCrawler\\task\\build\\classes\\java\\main;C:\\Users\\Anthony\\Code\\WebCrawler\\task\\build\\resources\\main;C:\\Users\\Anthony\\.gradle\\caches\\modules-2\\files-2.1\\org.jsoup\\jsoup\\1.15.1\\c4e25ce7c04dc4ae8f6db08f2391f38e9111231f\\jsoup-1.15.1.jar;C:\\Users\\Anthony\\.gradle\\caches\\modules-2\\files-2.1\\mysql\\mysql-connector-java\\8.0.13\\28015319e44ff50a8fee655e725fefc4990abeb1\\mysql-connector-java-8.0.13.jar;C:\\Users\\Anthony\\.gradle\\caches\\modules-2\\files-2.1\\com.google.protobuf\\protobuf-java\\3.6.1\\d06d46ecfd92ec6d0f3b423b4cd81cb38d8b924\\protobuf-java-3.6.1.jar'
+-d 'C:\\Users\\Anthony\\Code\\WebCrawler\\task\\build\\docs\\javadoc'
+-doctitle 'task API'
+-notimestamp 
+-quiet 
+-windowtitle 'task API'
+'C:\\Users\\Anthony\\Code\\WebCrawler\\task\\src\\crawler\\WebCrawler.java'

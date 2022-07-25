@@ -2,7 +2,7 @@ static String sanitizeName(String name) {
     return name.replaceAll("[ /\\\\:<>\"?*|]", "_")
 }
 
-rootProject.name = 'SearchOffline'
+rootProject.name = 'WebCrawler'
 
 rootProject.projectDir.eachDirRecurse {
     if (!isTaskDir(it) || it.path.contains(".idea")) {
